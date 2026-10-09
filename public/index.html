@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="theme-color" content="#1d1b19">
+<title>轻酒馆</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23c9733f'/%3E%3Cpath d='M18 20h24v20a10 10 0 0 1-10 10h-4a10 10 0 0 1-10-10z' fill='%23fff7ec'/%3E%3Cpath d='M42 25h4a6 6 0 0 1 0 12h-4' stroke='%23fff7ec' stroke-width='4' fill='none'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="css/app.css">
+<script src="vendor/lodash.min.js"></script>
+<script src="vendor/showdown.min.js"></script>
+<script src="vendor/purify.min.js"></script>
+</head>
+<body>
+<div id="app" class="app">
+    <aside id="left" class="drawer drawer-left" aria-label="角色与聊天"></aside>
+    <main id="center" class="center">
+        <header id="topbar" class="topbar"></header>
+        <div id="chat-scroll" class="chat-scroll">
+            <div id="chat" class="chat"></div>
+        </div>
+        <footer id="composer" class="composer"></footer>
+    </main>
+    <aside id="right" class="drawer drawer-right" aria-label="设置面板"></aside>
+    <div id="scrim" class="scrim" hidden></div>
+</div>
+<div id="toasts" class="toasts" aria-live="polite"></div>
+<div id="modal-root"></div>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

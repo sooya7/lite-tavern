@@ -1,0 +1,12 @@
+{
+  "name": "lite-tavern",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "轻酒馆：兼容酒馆角色卡/预设/世界书/正则/EJS/MVU 的轻量 AI 角色扮演前端",
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "engines": { "node": ">=18" }
+}

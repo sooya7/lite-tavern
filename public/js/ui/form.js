@@ -1,0 +1,114 @@
+// 表单小工具：直接绑定到对象字段，改动即写回并回调。
+import { h, icon } from './dom.js';
+
+export function field(label, control, hint) {
+    return h('div', { class: 'field' },
+        label ? h('label', { class: 'label' }, label) : null,
+        control,
+        hint ? h('div', { class: 'hint' }, hint) : null);
+}
+
+export function textInput(obj, key, { placeholder = '', type = 'text', onChange, autocomplete = 'off', list } = {}) {
+    const el = h('input', { class: 'input', type, placeholder, value: obj[key] ?? '', autocomplete, spellcheck: 'false', list });
+    el.addEventListener('input', () => { obj[key] = el.value; onChange?.(el.value); });
+    return el;
+}
+
+export function textArea(obj, key, { rows = 4, code = false, placeholder = '', onChange, autoGrow = true, maxRows = 24 } = {}) {
+    const el = h('textarea', { class: `textarea ${code ? 'code' : ''}`, rows, placeholder, spellcheck: 'false' });
+    el.value = obj[key] ?? '';
+    const grow = () => {
+        if (!autoGrow) return;
+        el.style.height = 'auto';
+        const lh = 20;
+        el.style.height = `${Math.min(el.scrollHeight + 2, maxRows * lh + 16)}px`;
+    };
+    el.addEventListener('input', () => { obj[key] = el.value; grow(); onChange?.(el.value); });
+    requestAnimationFrame(grow);
+    return el;
+}
+
+export function numberInput(obj, key, { min, max, step = 1, onChange, placeholder = '' } = {}) {
+    const el = h('input', { class: 'input', type: 'number', min, max, step, placeholder, value: obj[key] ?? '' });
+    el.addEventListener('input', () => {
+        if (el.value === '') return;
+        let v = Number(el.value);
+        if (Number.isNaN(v)) return;
+        obj[key] = v;
+        onChange?.(v);
+    });
+    return el;
+}
+
+export function checkbox(obj, key, label, { onChange, invert = false, hint } = {}) {
+    const input = h('input', { type: 'checkbox', checked: invert ? !obj[key] : !!obj[key] });
+    input.addEventListener('change', () => { obj[key] = invert ? !input.checked : input.checked; onChange?.(obj[key]); });
+    return h('label', { class: 'check', title: hint ?? '' }, input, h('span', {}, label));
+}
+
+export function toggle(checked, onChange, title = '') {
+    const input = h('input', { type: 'checkbox', checked });
+    input.addEventListener('change', () => onChange(input.checked));
+    return h('label', { class: 'switch', title, onclick: (e) => e.stopPropagation() }, input, h('span'));
+}
+
+/**
+ * @param {object} obj
+ * @param {string} key
+ * @param {Array<{value: any, label: string}>|Array<string>} options
+ */
+export function select(obj, key, options, { onChange, number = false } = {}) {
+    const el = h('select', { class: 'select' }, options.map(o => {
+        const opt = typeof o === 'object' ? o : { value: o, label: o };
+        return h('option', { value: String(opt.value), selected: String(obj[key] ?? '') === String(opt.value) }, opt.label);
+    }));
+    el.addEventListener('change', () => {
+        const v = number ? Number(el.value) : el.value;
+        obj[key] = v;
+        onChange?.(v);
+    });
+    return el;
+}
+
+export function rangeRow(obj, key, { min = 0, max = 1, step = 0.01, onChange } = {}) {
+    const range = h('input', { type: 'range', min, max, step, value: obj[key] ?? min });
+    const num = h('input', { class: 'input', type: 'number', min, max, step, value: obj[key] ?? min });
+    range.addEventListener('input', () => { num.value = range.value; obj[key] = Number(range.value); onChange?.(obj[key]); });
+    num.addEventListener('input', () => {
+        if (num.value === '' || Number.isNaN(Number(num.value))) return;
+        range.value = num.value;
+        obj[key] = Number(num.value);
+        onChange?.(obj[key]);
+    });
+    return h('div', { class: 'range-row' }, range, num);
+}
+
+export function section(title, ...children) {
+    return h('div', { class: 'card' }, title ? h('div', { class: 'card-title' }, title) : null, ...children);
+}
+
+export function collapsible(title, children, { open = false, sub } = {}) {
+    return h('details', { class: 'fold', open },
+        h('summary', {}, icon('chevronDown', 'fold-ic'), h('span', { class: 'grow' }, title), sub ? h('span', { class: 'muted small' }, sub) : null),
+        h('div', { class: 'fold-body' }, children));
+}
+
+/** JSON 编辑框：失焦或点保存时解析，失败标红 */
+export function jsonEditor(value, onSave, { rows = 10, label = '保存' } = {}) {
+    const ta = h('textarea', { class: 'textarea code', rows, spellcheck: 'false' });
+    ta.value = JSON.stringify(value ?? {}, null, 2);
+    const err = h('div', { class: 'hint', style: { color: 'var(--danger)' } });
+    const btn = h('button', {
+        class: 'btn small primary',
+        onclick: async () => {
+            try {
+                const v = ta.value.trim() ? JSON.parse(ta.value) : {};
+                err.textContent = '';
+                await onSave(v);
+            } catch (e) {
+                err.textContent = `JSON 有误：${e.message}`;
+            }
+        },
+    }, label);
+    return h('div', {}, ta, err, h('div', { class: 'row', style: { justifyContent: 'flex-end', marginTop: '6px' } }, btn));
+}
