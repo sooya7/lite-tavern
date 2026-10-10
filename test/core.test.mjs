@@ -619,6 +619,21 @@ test('共用酒馆数据：四类内容读写酒馆目录，设置和回收站�
         assert.equal(card.chat, '小红 - 旧聊天');
         assert.equal(card.create_date, '2026-01-01');
 
+        // 角色卡 / 预设 / 世界书：带着读到的版本号保存，磁盘上被别处改过就拦；选了覆盖先留备份
+        const pv = await store.versionOf('presets', '酒馆预设');
+        fs.writeFileSync(path.join(st, 'OpenAI Settings', '酒馆预设.json'), '{"temperature":0.3,"酒馆刚改的":true}');
+        await assert.rejects(store.saveJson('presets', '酒馆预设', { temperature: 2 }, { expect: pv }), (e) => e.status === 409 && e.code === 'conflict');
+        assert.equal(JSON.parse(fs.readFileSync(path.join(st, 'OpenAI Settings', '酒馆预设.json'), 'utf8')).酒馆刚改的, true);
+        await store.saveJson('presets', '酒馆预设', { temperature: 2 }, { expect: pv, force: true });
+        assert.ok(fs.readdirSync(path.join(own, 'backups', 'presets')).some(f => fs.readFileSync(path.join(own, 'backups', 'presets', f), 'utf8').includes('酒馆刚改的')));
+        await store.saveJson('presets', '酒馆预设', { temperature: 1 }, { expect: await store.versionOf('presets', '酒馆预设') });
+        await store.saveJson('presets', '酒馆预设', { temperature: 1.5 }); // 没带版本号（导入覆盖这类）不查
+        const cv = await store.versionOf('characters', file);
+        await store.setCardAvatar(file, fs.readFileSync(path.join(st, 'characters', file)));
+        const stale = await store.readCard(file);
+        if (cv !== await store.versionOf('characters', file)) await assert.rejects(store.saveCard(file, stale, { expect: cv }), (e) => e.code === 'conflict');
+        await store.saveCard(file, stale, { expect: await store.versionOf('characters', file) });
+
         // 设置各存各的：酒馆的 settings.json 一个字都不动
         await store.saveSettings({ connections: [] });
         assert.equal(fs.readFileSync(path.join(st, 'settings.json'), 'utf8'), '{"main_api":"openai"}');
@@ -676,8 +691,9 @@ test('共用酒馆数据：聊天被别处改过会拦下来，每次保存换�
         const backups = fs.readdirSync(path.join(own, 'backups', 'chats', '小明'));
         assert.ok(backups.some(f => fs.readFileSync(path.join(own, 'backups', 'chats', '小明', f), 'utf8').includes('酒馆里回的')), '覆盖前的内容在备份里');
         assert.equal(await store.chatVersion('小明', '聊天一'), v2);
-        // 没带版本号（新建聊天）不检查
+        // 新建聊天不用带版本号；文件已经在了还不带就拦（旧页面、漏了版本号的代码都别想悄悄盖掉）
         await store.saveChat('小明', '新聊天', chatText('', '开场白'));
+        await assert.rejects(store.saveChat('小明', '新聊天', chatText('', '另一份')), (e) => e.code === 'chat-conflict');
         assert.ok(!fs.existsSync(path.join(dir, '新聊天.luker-state.chat_sync.json')), 'Luker 没建过的附属文件不替它建');
 
         // 改名、删除：附属文件跟着走

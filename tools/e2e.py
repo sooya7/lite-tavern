@@ -897,6 +897,45 @@ def main():
                 sp.locator('.modal-foot button', has_text='用这边的覆盖').click()
                 sp.wait_for_function("() => !document.querySelector('.modal')")
             run('共用：聊天被酒馆改过时拦下来问，载入最新 / 覆盖（留备份）/ 先不管都对', shared_conflict)
+
+            def shared_preset_conflict():
+                def temp_input():
+                    sp.locator('#right .panel-search input').fill('temperature')
+                    sp.locator('#right .panel-result', has_text='温度').first.click()
+                    sp.wait_for_timeout(300)
+                    return sp.locator('#right .flash input[type=number]').first
+                pf = st_file('OpenAI Settings', '默认.json')
+                assert os.path.exists(pf), '没有预设时新建的「默认」应该落在酒馆的 OpenAI Settings 里'
+                temp_input().fill('1.23')
+                sp.wait_for_timeout(1200)
+                assert json.load(open(pf, encoding='utf-8'))['temperature'] == 1.23
+                # 酒馆那边保存了这个预设
+                j = json.load(open(pf, encoding='utf-8'))
+                j['temperature'] = 0.42
+                j['酒馆那边加的'] = True
+                json.dump(j, open(pf, 'w', encoding='utf-8'), ensure_ascii=False)
+                temp_input().fill('1.5')
+                sp.wait_for_selector('.modal >> text=预设「默认」在别处被改过了')
+                assert json.load(open(pf, encoding='utf-8'))['temperature'] == 0.42, '被拦下来就不能写进去'
+                sp.locator('.modal-foot button', has_text='载入最新的').click()
+                sp.wait_for_function("() => !document.querySelector('.modal')")
+                sp.wait_for_timeout(300)
+                assert temp_input().input_value() == '0.42', '载入最新的之后应该显示酒馆那边的值'
+                temp_input().fill('0.9')
+                sp.wait_for_timeout(1200)
+                j = json.load(open(pf, encoding='utf-8'))
+                assert j['temperature'] == 0.9 and j['酒馆那边加的'] is True, '载入之后再改能存，酒馆加的字段还在'
+            run('共用：预设被酒馆改过时也拦下来问', shared_preset_conflict)
+
+            def stale_page_blocked():
+                # 没带前后端版本标记的保存请求（= 更新前就开着的旧页面）一律挡住，读不受影响
+                r = sp.evaluate("""async () => {
+                    const put = await fetch('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: '{"坏了":1}' });
+                    const get = await fetch('/api/settings');
+                    return { put: put.status, code: (await put.json()).error?.code, get: get.status, broken: '坏了' in (await get.json()) };
+                }""")
+                assert r == {'put': 409, 'code': 'stale-client', 'get': 200, 'broken': False}, r
+            run('旧页面的保存请求被挡住', stale_page_blocked)
             sctx.close()
 
         browser.close()

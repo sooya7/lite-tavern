@@ -1,6 +1,6 @@
 // 应用动作：选角色、开/建聊天、构建会话、消息增删改。UI 模块都通过这里改状态。
 import { api } from './api.js';
-import { state, eventSource, event_types, saveChat, writeChat, onChatConflict, saveSettings, ensurePreset, loadWorld, activePersona, refreshLists, flushPending, mvuEmitter } from './state.js';
+import { state, eventSource, event_types, saveChat, writeChat, onChatConflict, onFileConflict, saveSettings, ensurePreset, loadWorld, activePersona, refreshLists, flushPending, mvuEmitter } from './state.js';
 import { ChatSession } from './core/session.js';
 import { parseChatJsonl, newChatHeader, createGreetingMessage, createUserMessage, newChatName, messageText, syncSwipe } from './core/chat.js';
 import { cardGreetings } from './core/card.js';
@@ -106,6 +106,25 @@ onChatConflict(async (chat, charId) => {
         }
     } else {
         chat.conflict = false;
+    }
+});
+
+const fileConflictsOpen = new Set();
+/** 角色卡 / 预设 / 世界书同理：别处改过就问，不替用户决定谁的算数 */
+onFileConflict(async ({ key, label, reload, overwrite }) => {
+    if (fileConflictsOpen.has(key)) return;
+    fileConflictsOpen.add(key);
+    const choice = await modal({
+        title: `${label}在别处被改过了`,
+        body: h('div', { style: { whiteSpace: 'pre-wrap' } }, `这边打开之后，它又被别处改过${state.server?.shared ? '（比如在酒馆那边保存过）' : '（比如另一个窗口）'}，所以这边刚才的修改还没有保存。\n\n载入最新的：换成磁盘上现在的内容，这边没保存的修改作废。\n用这边的覆盖：把这边的内容写进去，别处的修改会被盖掉（覆盖前会自动留一份备份）。`),
+        actions: [{ label: '用这边的覆盖', value: 'overwrite', danger: true }, { label: '载入最新的', value: 'reload', primary: true }],
+    }).done;
+    fileConflictsOpen.delete(key);
+    try {
+        if (choice === 'overwrite') { await overwrite(); toast('已用这边的内容覆盖', 'success'); }
+        else if (choice === 'reload') { await reload(); refresh(); toast('已载入最新的内容', 'success'); }
+    } catch (e) {
+        toast(`没成功：${e.message}`, 'error');
     }
 });
 

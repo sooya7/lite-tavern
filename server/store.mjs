@@ -100,6 +100,33 @@ export class Store {
         return dest;
     }
 
+    /** 文件的版本号：谁写一次就会变。读的时候发给前端，保存时带回来，对不上就说明中间被别处改过 */
+    async fileVersion(file) {
+        try {
+            const st = await fsp.stat(file);
+            return `${Math.floor(st.mtimeMs)}-${st.size}`;
+        } catch {
+            return '';
+        }
+    }
+
+    /** kind：characters / presets / worlds；name：角色卡带扩展名的文件名，其余是不带 .json 的名字 */
+    versionOf(kind, name) {
+        return this.fileVersion(this.p(kind, kind === 'characters' ? sanitizeName(name) : `${sanitizeName(name)}.json`));
+    }
+
+    /**
+     * 保存前核对：前端带了版本号（expect），而磁盘上已经不是那一版，就拒绝（409 conflict）。
+     * 没带版本号不查（新建、导入覆盖这类本来就没读过的情况）；force 是用户明确选了覆盖，覆盖前留一份备份。
+     */
+    async guardWrite(file, { expect = '', force = false } = {}, what = '这个文件', backup = null) {
+        if (!expect) return;
+        const current = await this.fileVersion(file);
+        if (!current || current === expect) return;
+        if (!force) throw new HttpError(409, `${what}在别处被改过了`, 'conflict');
+        if (backup) await this.backupFile(file, backup.sub, backup.base, backup.keep ?? 5);
+    }
+
     // ---------- 设置与密钥 ----------
     async getSettings() {
         return this.readJsonFile(this.p('settings.json'), {});
@@ -216,8 +243,9 @@ export class Store {
         return { file, card, world };
     }
 
-    async saveCard(file, card) {
+    async saveCard(file, card, check = {}) {
         const full = this.p('characters', sanitizeName(file));
+        await this.guardWrite(full, check, '这张角色卡', { sub: 'characters', base: sanitizeName(file).replace(/\.(png|json)$/i, ''), keep: 3 });
         let image;
         try {
             const buf = new Uint8Array(await fsp.readFile(full));
@@ -307,13 +335,8 @@ export class Store {
     }
 
     /** 聊天文件的版本号：任何一方（酒馆、另一个窗口）一写就会变，保存时拿它判断“我手里的还是不是最新的” */
-    async chatVersion(charId, name) {
-        try {
-            const st = await fsp.stat(this.chatFile(charId, name));
-            return `${Math.floor(st.mtimeMs)}-${st.size}`;
-        } catch {
-            return '';
-        }
+    chatVersion(charId, name) {
+        return this.fileVersion(this.chatFile(charId, name));
     }
 
     async readChat(charId, name) {
@@ -323,13 +346,14 @@ export class Store {
     /**
      * @param {{expect?: string, force?: boolean, backupEveryMs?: number}} [o]
      *   expect：读这个聊天时拿到的版本号。磁盘上的已经不是这个版本就拒绝（409 chat-conflict），force 跳过检查。
+     *   聊天比别的文件管得严：文件已经在了却没带版本号也拒绝——聊天最容易两边同时在写，写错了也最心疼。
      * @returns {Promise<string>} 写完之后的版本号
      */
     async saveChat(charId, name, text, { expect = '', force = false, backupEveryMs = 10 * 60 * 1000 } = {}) {
         const file = this.chatFile(charId, name);
-        if (expect && !force) {
+        if (!force) {
             const current = await this.chatVersion(charId, name);
-            if (current && current !== expect) throw new HttpError(409, '这个聊天在别处被改过了', 'chat-conflict');
+            if (current && current !== expect) throw new HttpError(409, expect ? '这个聊天在别处被改过了' : '这个聊天已经存在，保存时却没带版本号', 'chat-conflict');
         }
         const key = `${charId}/${name}`;
         const last = this.lastBackup.get(key) ?? 0;
@@ -408,8 +432,9 @@ export class Store {
         return data;
     }
 
-    async saveJson(kind, name, data) {
+    async saveJson(kind, name, data, check = {}) {
         const file = this.p(kind, `${sanitizeName(name)}.json`);
+        await this.guardWrite(file, check, kind === 'worlds' ? '这本世界书' : '这个预设', { sub: kind, base: sanitizeName(name) });
         if (kind === 'worlds' && fs.existsSync(file)) {
             const key = `${kind}/${name}`;
             if (Date.now() - (this.lastBackup.get(key) ?? 0) > 10 * 60 * 1000) {

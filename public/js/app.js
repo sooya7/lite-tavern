@@ -130,6 +130,14 @@ async function boot() {
     state.settings = withDefaults(raw);
     applyAppearance();
     window.addEventListener('lt:need-login', () => loginDialog().then(() => location.reload()));
+    // 服务端升级了、这个页面还是旧的：再保存会被服务端挡住。只提示一次，让用户自己挑时候刷新
+    window.addEventListener('lt:stale-client', () => {
+        modal({
+            title: '页面需要刷新',
+            body: h('div', { style: { whiteSpace: 'pre-wrap' } }, '轻酒馆刚更新过，这个页面还是旧版本，刚才的修改没有保存。\n刷新之后再继续；输入框里没发出去的字先复制一下。'),
+            actions: [{ label: '先不刷新', value: false }, { label: '刷新页面', primary: true, onClick: () => { location.reload(); return false; } }],
+        });
+    }, { once: true });
 
     bindUI({ sidebar: renderSidebar, chat: renderChat, topbar: renderTopbar, panels: renderPanels, appendMessage, renderMessage, renderChat });
     bindGenerateUI({

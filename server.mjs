@@ -13,6 +13,11 @@ import { detectStDirs, scanStDir, importFromSt } from './server/st-import.mjs';
 import { flattenScriptTrees, scriptTreesOf } from './public/js/core/scripts.js';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
+// 前后端约定的版本。保存的规矩变了就加一：还开着旧页面的浏览器再来保存会被挡住并提示刷新，
+// 免得旧页面按老规矩（比如不带版本号）把别处刚写的内容盖掉。
+const CLIENT_PROTOCOL = '2';
+/** 保存请求里前端带回来的“我读到的是哪一版 / 用户选了覆盖” */
+const writeCheck = (req) => ({ expect: String(req.headers['x-expect'] ?? ''), force: req.headers['x-force'] === '1' });
 const PUBLIC = path.join(ROOT, 'public');
 
 function parseArgs(argv) {
@@ -64,7 +69,7 @@ function isAuthed(req) {
 }
 
 // ---------- 状态 ----------
-router.get('/api/ping', async () => ({ ok: true, version: '0.1.0', data: config.data, shared: store.stData, auth: !!config.password }));
+router.get('/api/ping', async () => ({ ok: true, version: '0.1.0', protocol: CLIENT_PROTOCOL, data: config.data, shared: store.stData, auth: !!config.password }));
 
 router.post('/api/login', async (req, res) => {
     const { password } = await readJson(req);
@@ -93,7 +98,10 @@ router.put('/api/secrets/:id', async (req, res, { id }) => {
 
 // ---------- 角色卡 ----------
 router.get('/api/characters', async () => store.listCharacters());
-router.get('/api/characters/:file', async (req, res, { file }) => store.readCard(file));
+router.get('/api/characters/:file', async (req, res, { file }) => {
+    res.setHeader('X-Version', await store.versionOf('characters', file));
+    return store.readCard(file);
+});
 router.get('/api/characters/:file/avatar', async (req, res, { file }) => {
     const url = new URL(req.url, 'http://x');
     // ?thumb=1 给列表用的小图；带了 ?v=（原图 mtime）就允许浏览器长期缓存，省掉每张头像一次 304 往返
@@ -108,9 +116,14 @@ router.get('/api/characters/:file/avatar', async (req, res, { file }) => {
     serveFile(req, res, store.p('characters', sanitizeName(file)), { cache: 'no-cache' });
     return undefined;
 });
-router.put('/api/characters/:file', async (req, res, { file }) => store.saveCard(file, await readJson(req)));
+router.put('/api/characters/:file', async (req, res, { file }) => {
+    const card = await store.saveCard(file, await readJson(req), writeCheck(req));
+    res.setHeader('X-Version', await store.versionOf('characters', file));
+    return card;
+});
 router.put('/api/characters/:file/avatar', async (req, res, { file }) => {
     await store.setCardAvatar(file, await readBody(req));
+    res.setHeader('X-Version', await store.versionOf('characters', file));
     return { ok: true };
 });
 router.delete('/api/characters/:file', async (req, res, { file }) => {
@@ -154,7 +167,7 @@ router.get('/api/chats/:char/:name', async (req, res, { char, name }) => {
     // 先取版本号再读内容：中间要是被别处改了，前端拿到的版本号偏旧，下次保存会被拦下来（宁可多问一次）
     const version = await store.chatVersion(char, name);
     const text = await store.readChat(char, name);
-    res.setHeader('X-Chat-Version', version);
+    res.setHeader('X-Version', version);
     sendText(res, 200, text, 'application/jsonl; charset=utf-8');
     return undefined;
 });
@@ -162,10 +175,7 @@ router.put('/api/chats/:char/:name', async (req, res, { char, name }) => {
     const text = (await readBody(req)).toString('utf8');
     const first = text.slice(0, text.indexOf('\n') > 0 ? text.indexOf('\n') : undefined);
     try { JSON.parse(first); } catch { throw new HttpError(400, '聊天格式不对'); }
-    const version = await store.saveChat(char, name, text, {
-        expect: String(req.headers['x-chat-expect'] ?? ''),
-        force: req.headers['x-chat-force'] === '1',
-    });
+    const version = await store.saveChat(char, name, text, writeCheck(req));
     return { ok: true, version };
 });
 router.post('/api/chats/:char/:name/rename', async (req, res, { char, name }) => {
@@ -181,9 +191,13 @@ router.delete('/api/chats/:char/:name', async (req, res, { char, name }) => {
 // ---------- 预设 / 世界书 ----------
 for (const kind of ['presets', 'worlds']) {
     router.get(`/api/${kind}`, async () => store.listJson(kind));
-    router.get(`/api/${kind}/:name`, async (req, res, { name }) => store.readJson(kind, name));
+    router.get(`/api/${kind}/:name`, async (req, res, { name }) => {
+        res.setHeader('X-Version', await store.versionOf(kind, name));
+        return store.readJson(kind, name);
+    });
     router.put(`/api/${kind}/:name`, async (req, res, { name }) => {
-        await store.saveJson(kind, name, await readJson(req));
+        await store.saveJson(kind, name, await readJson(req), writeCheck(req));
+        res.setHeader('X-Version', await store.versionOf(kind, name));
         return { ok: true };
     });
     router.delete(`/api/${kind}/:name`, async (req, res, { name }) => {
@@ -226,6 +240,10 @@ const server = http.createServer(async (req, res) => {
     try {
         if (pathname.startsWith('/api/')) {
             if (pathname !== '/api/login' && pathname !== '/api/ping' && !isAuthed(req)) throw new HttpError(401, '需要登录');
+            const writes = req.method !== 'GET' && req.method !== 'HEAD' && pathname !== '/api/login' && !pathname.startsWith('/api/llm/');
+            if (writes && req.headers['x-lt-client'] !== CLIENT_PROTOCOL) {
+                throw new HttpError(409, '页面是旧版本，请刷新页面后再操作（这次没有保存）', 'stale-client');
+            }
             const m = router.match(req.method, pathname);
             if (!m) throw new HttpError(404, `没有这个接口：${req.method} ${pathname}`);
             const result = await m.handler(req, res, m.params);

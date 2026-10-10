@@ -196,22 +196,57 @@ export function saveChat({ now = false } = {}) {
     if (now) return _saveChat.flush();
 }
 
+let fileConflictHandler = null;
+/**
+ * 角色卡 / 预设 / 世界书在别处被改过、这边存不进去时找谁问用户（界面层注册）。
+ * 传过去的是 {key, label, reload(), overwrite()}：reload 把磁盘上最新的载进来，overwrite 用这边的盖掉。
+ */
+export function onFileConflict(fn) {
+    fileConflictHandler = fn;
+}
+
+function saveFailed(e, what, conflict) {
+    if (e.code === 'conflict' && fileConflictHandler) fileConflictHandler(conflict);
+    else if (e.code !== 'stale-client') toast(`${what}保存失败：${e.message}`, 'error'); // 旧页面另有一个整页的提示
+}
+
 export const savePreset = debounce(async () => {
-    if (!state.preset) return;
+    const p = state.preset;
+    if (!p) return;
     try {
-        await api.save('presets', state.preset.name, state.preset.data);
+        await api.save('presets', p.name, p.data);
     } catch (e) {
-        toast(`预设保存失败：${e.message}`, 'error');
+        saveFailed(e, '预设', {
+            key: `presets/${p.name}`,
+            label: `预设「${p.name}」`,
+            reload: async () => {
+                const data = normalizePreset(await api.get('presets', p.name));
+                if (state.preset === p) { state.preset = { name: p.name, data }; state.session = null; }
+            },
+            overwrite: () => api.save('presets', p.name, p.data, { force: true }),
+        });
     }
 }, 600);
 
 export const saveCharacter = debounce(async () => {
-    if (!state.char) return;
+    const c = state.char;
+    if (!c) return;
     try {
-        await api.saveCharacter(state.char.file, state.char.card);
-        await eventSource.emit(event_types.CHARACTER_EDITED, state.char);
+        await api.saveCharacter(c.file, c.card);
+        await eventSource.emit(event_types.CHARACTER_EDITED, c);
     } catch (e) {
-        toast(`角色卡保存失败：${e.message}`, 'error');
+        saveFailed(e, '角色卡', {
+            key: `characters/${c.file}`,
+            label: `角色卡「${c.card?.data?.name ?? c.id}」`,
+            reload: async () => {
+                c.card = await api.getCharacter(c.file);
+                if (state.char === c) { state.session = null; await eventSource.emit(event_types.CHARACTER_EDITED, c); }
+            },
+            overwrite: async () => {
+                await api.saveCharacter(c.file, c.card, { force: true });
+                await eventSource.emit(event_types.CHARACTER_EDITED, c);
+            },
+        });
     }
 }, 700);
 
@@ -223,7 +258,19 @@ export function saveWorld(name) {
                 await api.save('worlds', name, state.worlds[name]);
                 await eventSource.emit(event_types.WORLDINFO_UPDATED, name);
             } catch (e) {
-                toast(`世界书保存失败：${e.message}`, 'error');
+                saveFailed(e, '世界书', {
+                    key: `worlds/${name}`,
+                    label: `世界书「${name}」`,
+                    reload: async () => {
+                        await loadWorld(name, { force: true });
+                        state.session = null;
+                        await eventSource.emit(event_types.WORLDINFO_UPDATED, name);
+                    },
+                    overwrite: async () => {
+                        await api.save('worlds', name, state.worlds[name], { force: true });
+                        await eventSource.emit(event_types.WORLDINFO_UPDATED, name);
+                    },
+                });
             }
         }, 600));
     }
