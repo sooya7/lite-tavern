@@ -560,7 +560,7 @@ def main():
             page.wait_for_selector('#chat .home-wrap')
             page.locator('#chat .home-tab', has_text='角色库').click()
             with page.expect_file_chooser() as fc:
-                page.locator('#chat .lib-head button', has_text='导入').click()
+                page.locator('#chat .home-tab-actions button', has_text='导入').click()
             fc.value.set_files(SCRIPT_CARD)
             page.wait_for_selector('#toasts .toast >> text=已导入角色「脚本测试卡」', timeout=10000)
             tip = page.locator('#toasts .toast', has_text='已导入角色「脚本测试卡」').inner_text()

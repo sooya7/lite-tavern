@@ -48,7 +48,11 @@ export function renderHome(el) {
         class: `home-tab ${homeTab === id ? 'active' : ''}`,
         onclick: () => { if (homeTab !== id) { homeTab = id; refresh(['chat']); } },
     }, label);
-    wrap.append(h('div', { class: 'home-tabs' }, tab('recent', '最近聊天'), tab('library', '角色库')));
+    wrap.classList.add(`home-${homeTab}`);
+    wrap.append(h('div', { class: 'home-tabs' }, tab('recent', '最近聊天'), tab('library', '角色库'),
+        homeTab === 'library' ? h('div', { class: 'home-tab-actions' },
+            h('button', { class: 'btn', title: '导入角色卡', onclick: onImport }, icon('upload'), h('span', { class: 'bt-label' }, '导入')),
+            h('button', { class: 'btn primary', title: '新建角色', onclick: onCreate }, icon('plus'), h('span', { class: 'bt-label' }, '新建'))) : null));
     wrap.append(homeTab === 'library' ? library() : recentChats());
     el.append(wrap);
 }
@@ -71,7 +75,7 @@ function recentChats() {
 
 function recentItem(c) {
     const current = state.char?.file === c.file && state.chat?.name === c.chat;
-    const meta = [chatTitle(c.chat, c.charName), c.count > 0 ? `${c.count} 条` : ''].filter(Boolean).join(' · ');
+    const meta = [chatTitle(c.chat, c.charName), c.count > 0 ? `${c.count} 楼` : ''].filter(Boolean).join(' · ');
     return h('button', {
         class: `recent-item ${current ? 'active' : ''}`,
         title: `${c.charName} · ${c.chat}`,
@@ -82,8 +86,8 @@ function recentItem(c) {
         h('div', { class: 'ri-top' },
             h('span', { class: 'ri-name' }, c.charName),
             h('span', { class: 'ri-time' }, formatTime(c.mtime))),
-        h('div', { class: 'ri-meta' }, meta),
-        c.last ? h('div', { class: 'ri-last' }, plainSnippet(c.last, 120)) : null));
+        h('div', { class: 'ri-last' }, c.last ? plainSnippet(c.last, 120) : '（空）'),
+        h('div', { class: 'ri-meta' }, meta)));
 }
 
 async function openRecent(c) {

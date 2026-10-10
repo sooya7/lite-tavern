@@ -502,6 +502,23 @@ export function stampIntegrity(text) {
 }
 
 /** 统计聊天条数与最后一条消息预览（只读尾部） */
+/** 正文常放在这些标签里；思维链、状态栏、变量更新之类的都不是“最后说了什么” */
+const PROSE_TAGS = ['story_scene', 'content', 'maintext', 'gametxt', 'story', '正文', 'StoryText', 'main_text'];
+const NOISE_TAGS = /<(think|thinking|reasoning|acg_think|story_driver|logic_check|globalTime|UpdateVariable|Analysis|JSONPatch|memory_log|Memory|selection|options|status_bar|summary_format|current_event|progress|summary|details|advice|tucao|disclaimer|style|script|[A-Za-z]*Panel|[A-Za-z]*HUD)\b[^>]*>[\s\S]*?<\/\1>/gi;
+
+/** 从一条楼层里挑出给列表看的那一小段：先找正文标签，没有就去掉思维链、状态栏等标签块，剩下的去 HTML、压空白 */
+export function previewText(mes, max = 120) {
+    let t = String(mes ?? '');
+    for (const tag of PROSE_TAGS) {
+        const re = new RegExp(`<${tag}\\b[^>]*>([\\s\\S]*?)</${tag}>`, 'gi');
+        const all = [...t.matchAll(re)].map(m => m[1]).filter(x => x.replace(/<[^>]*>/g, '').trim());
+        if (all.length) { t = all[all.length - 1]; break; }
+    }
+    t = t.replace(/<think>[\s\S]*?<\/think>/gi, ' ').replace(NOISE_TAGS, ' ').replace(NOISE_TAGS, ' ');
+    t = t.replace(/```[\s\S]*?(```|$)/g, ' ').replace(/<[^>]*>/g, ' ').replace(/[*_`#>]+/g, '').replace(/\s+/g, ' ').trim();
+    return t.slice(0, max);
+}
+
 async function chatSummary(file, size) {
     const fh = await fsp.open(file, 'r');
     try {
@@ -520,7 +537,7 @@ async function chatSummary(file, size) {
             try { last = JSON.parse(lines[lines.length - 1])?.mes ?? ''; } catch { /* 忽略 */ }
             count = -1;
         }
-        return { count, last: String(last).replace(/\s+/g, ' ').slice(0, 120) };
+        return { count, last: previewText(last) };
     } finally {
         await fh.close();
     }
