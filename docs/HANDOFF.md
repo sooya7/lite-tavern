@@ -147,6 +147,16 @@ docs/HANDOFF.md         本文档
 - 角色卡 / 世界书 / 预设在 Luker 那边没有冲突检查：它拿着旧内容保存会直接盖掉轻酒馆的修改。轻酒馆这边能发现并提示，Luker 那边不能。给用户的规矩是：**一边改完，另一边先刷新页面再改**。
 - Luker 的 `secrets.json`：`api_key_custom` 是 36 个 `{id, value, label, active}`，其中约一半 `value` 是空的；另有 2 个 `api_key_deepseek`。只有 9 个 Key 挂在连接配置上，其余的没有对应地址，没法迁成连接——告诉用户。**任何时候都不要把 Key 的值打印出来。**
 
+## 3.7 酒馆第三方插件（2026-10-10，首个目标：柚月の记忆 yuzuki-Memory）
+
+- 服务端：`--extensions-dir`（默认 `data/extensions`）下每个带 `manifest.json` 的子目录是一个插件，按酒馆的 URL `/scripts/extensions/third-party/<目录>/...` 提供（需登录）。117 上直接指向 Luker 的 `/opt/luker/extensions`（只读），两边插件版本一致。
+- 兼容接口在 `server/st-compat.mjs`：`/api/extensions`（列表）、`/api/backends/chat-completions/generate|status`（带 `reverse_proxy` 就转发到那个 OpenAI 兼容地址，`proxy_password` 当 Bearer；不带就借轻酒馆当前连接；Gemini 原生 `makersuite` 暂不支持，返回 400，柚月会自动降级到 OpenAI 协议）、`/api/settings/get`（最小的酒馆设置，不含密钥）、`/api/worldinfo/get|edit`、`/api/vector/list|insert|delete|purge|query-multi`（向量存在轻酒馆自己的 `data/vectors/`，JSON 文件 + 余弦相似度）、`/csrf-token`。这些路径不要求 `X-LT-Client` 版本头。
+- 前端：`public/js/ui/extensions.js` 是加载器（设置 › 通用 › 酒馆插件 的开关存在 `settings.thirdParty[目录名]`，刷新后生效）；启动后后台 `import()` 插件入口，先引入本地的 Font Awesome 6（`public/vendor/fontawesome`；CSS 在仓库里，字体用 `node tools/fetch-fontawesome.mjs` 下载，默认走 npmmirror）。`public/script.js`、`public/scripts/extensions.js`、`public/scripts/world-info.js`、`public/scripts/macros/macro-system.js`、`public/st-context.js` 是酒馆同名模块的兼容实现，插件按相对路径 import 会落到这里。宏系统注册接到 `core/macros.js` 的 `macroEngine`。
+- `manifest.generate_interceptor`：`generate.js` 在组装提示词前调用（`runGenerateInterceptors`），拿到去掉隐藏楼的聊天副本，改动通过 `preparePrompt({chatOverride})` 只影响这次请求。
+- 插件放进 `#extensionsMenu`（酒馆的魔棒菜单）的入口，轻酒馆列在输入框 + 菜单里，点击时同时发 Enter 键和 click 给原元素。
+- `SillyTavern.getContext()` 补了 `loadWorldInfo/saveWorldInfo/setExtensionPrompt/extensionPrompts/isGenerating`，`chatMetadata` 会在聊天头里建好 `chat_metadata` 再给出去（插件写入能随聊天保存，共用模式下和 Luker 看到同一份柚月记忆）。
+- 已验证（本地无头浏览器）：柚月 1.0.8 的 30 个模块全部加载无报错、记忆窗口打开、插件自己的 API（流式/非流式）与借主连接都通、正常发消息不受影响。没测：真实长聊天上的自动总结/填表全过程、向量化全流程、手机触屏布局。
+
 ## 4. 数据与兼容约定
 
 - 数据目录结构与酒馆对应：`characters/*.png`、`chats/<角色>/*.jsonl`、`presets/*.json`、`worlds/*.json`、`avatars/`；另有 `settings.json`、`secrets.json`、`backups/`、`trash/`

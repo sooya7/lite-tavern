@@ -321,11 +321,11 @@ export class ChatSession {
     // ---------- 提示词 ----------
     /**
      * @param {{type?: string, quietPrompt?: string, dryRun?: boolean, excludeLast?: boolean,
-     *   maxHistory?: number, historyOverride?: Array<{role: string, content: string}>, appendHistory?: Array<{role: string, content: string}>,
+     *   maxHistory?: number, chatOverride?: object[], historyOverride?: Array<{role: string, content: string}>, appendHistory?: Array<{role: string, content: string}>,
      *   fieldOverrides?: object}} opt 后四个是给脚本的 generate() 用的：只取最近几条聊天记录、整段替换聊天记录、
      *   在聊天记录末尾加几条（这次的用户输入）、覆盖角色描述等字段
      */
-    async preparePrompt({ type = 'normal', quietPrompt = '', dryRun = false, excludeLast = false, maxHistory, historyOverride, appendHistory, fieldOverrides } = {}) {
+    async preparePrompt({ type = 'normal', quietPrompt = '', dryRun = false, excludeLast = false, maxHistory, historyOverride, appendHistory, fieldOverrides, chatOverride } = {}) {
         this.lastGenerationType = type;
         if (!dryRun) this.ensureMvuInit();
         const wiSettings = { ...DEFAULT_WI_SETTINGS, ...(this.settings.worldInfo ?? {}) };
@@ -343,7 +343,8 @@ export class ChatSession {
             const fields = this._fieldsCache;
             const sub = (t, extra) => this.substitute(t, extra, fields);
 
-            let core = this.chat.map((m, index) => ({ m, index })).filter(x => !x.m.is_system);
+            // chatOverride：插件的生成拦截器改过的聊天记录（只影响这次请求，不改真正的聊天）
+            let core = (Array.isArray(chatOverride) ? chatOverride : this.chat).map((m, index) => ({ m, index })).filter(x => !x.m.is_system);
             if (excludeLast && core.length) core.pop();
             core = core.map((x, i) => ({
                 ...x,

@@ -26,6 +26,8 @@ node server.mjs --port 8730 --host 0.0.0.0 --password 你的密码 --data D:/lt-
 
 与酒馆 / Luker 共用数据：加 `--st-data <酒馆用户数据目录>`（如 `data/default-user`），角色卡、聊天、世界书、预设直接读写那一份，两边同时改同一个文件时会弹窗让你选。连接和 Key 可在 设置 › 导入 里从酒馆搬过来。细节见交接文档 3.6 节。
 
+酒馆第三方插件（如柚月の记忆）：加 `--extensions-dir <插件目录>`（默认 `数据目录/extensions`，每个子目录一个带 `manifest.json` 的插件，可以直接指向酒馆的 `public/scripts/extensions/third-party`），然后在 设置 › 通用 › 酒馆插件 里打开、刷新页面。轻酒馆在 `public/script.js`、`public/scripts/*.js` 提供了酒馆模块的兼容实现，后端提供 `/api/backends/chat-completions/*`、`/api/worldinfo/*`、`/api/vector/*`、`/csrf-token` 等插件常用接口；插件的入口出现在输入框左边的 + 菜单里。插件图标用的 Font Awesome 字体不在仓库里，第一次用插件前跑一次 `node tools/fetch-fontawesome.mjs`。
+
 ## 测试
 
 ```bash
@@ -42,4 +44,4 @@ python tools/e2e.py
 
 ## 第三方
 
-`public/vendor/` 下的 js-yaml、lodash、showdown、DOMPurify、jQuery 各自附带许可证文件。
+`public/vendor/` 下的 js-yaml、lodash、showdown、DOMPurify、jQuery、Font Awesome Free（给酒馆插件用的图标）各自附带许可证文件。

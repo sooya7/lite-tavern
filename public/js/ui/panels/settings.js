@@ -2,6 +2,7 @@
 import { h } from '../dom.js';
 import { state, saveSettings } from '../../state.js';
 import { refresh } from '../../controller.js';
+import { extensionList, fetchExtensionList, isExtensionEnabled, setExtensionEnabled } from '../extensions.js';
 import { field, numberInput, checkbox, select, textArea, section, collapsible, rangeRow } from '../form.js';
 
 let followSystem = null;
@@ -77,6 +78,8 @@ export function render(body) {
         field('把这些“正文”当成错误（每行一个正则）', textArea(r, 'errorPatterns', { rows: 3, code: true, onChange: save }), '有的中转会把上游报错当成正常回复返回，命中这里的短回复会被当作失败重试'),
     ));
 
+    body.append(extensionsSection());
+
     body.append(collapsible('关于', [
         h('div', { class: 'kv' },
             h('span', { class: 'k' }, '数据目录'), h('span', { style: { wordBreak: 'break-all' } }, state.server?.data ?? ''),
@@ -85,4 +88,28 @@ export function render(body) {
         ),
         h('div', { class: 'hint', style: { marginTop: '8px' } }, '数据格式与酒馆一致：characters/ 下是 PNG 角色卡，chats/ 下是 JSONL 聊天，presets/ 和 worlds/ 是 JSON，可以直接拷回酒馆使用。'),
     ]));
+}
+
+/** 酒馆第三方插件（如柚月の记忆）：开关，改完刷新页面生效 */
+function extensionsSection() {
+    const list = h('div', {});
+    const draw = () => {
+        list.replaceChildren();
+        if (!extensionList.length) {
+            list.append(h('div', { class: 'hint' }, '插件目录里没有插件。把酒馆插件（带 manifest.json 的文件夹）放进服务端的插件目录（启动参数 --extensions-dir）后刷新。'));
+            return;
+        }
+        for (const e of extensionList) {
+            const box = { on: isExtensionEnabled(e.name) };
+            const status = e.error ? `加载失败：${e.error}` : e.loaded ? '已加载' : box.on ? '刷新页面后加载' : '';
+            list.append(checkbox(box, 'on', `${e.display_name}${e.version ? ` ${e.version}` : ''}`, {
+                onChange: (v) => { setExtensionEnabled(e.name, v); draw(); },
+            }));
+            if (status || e.description) list.append(h('div', { class: 'hint', style: { margin: '-4px 0 8px 26px' } }, [e.description, status].filter(Boolean).join(' · ')));
+        }
+        list.append(h('div', { class: 'hint' }, '开关改完要刷新页面才生效。插件的设置界面由插件自己提供（通常是页面上的悬浮按钮或菜单）。'));
+    };
+    if (extensionList.length) draw();
+    else fetchExtensionList().then(draw, (e) => { list.replaceChildren(h('div', { class: 'hint' }, e.message)); });
+    return section('酒馆插件', list);
 }

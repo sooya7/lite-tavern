@@ -2,7 +2,7 @@
 // 每个脚本拿到一份绑定了自己身份的接口（createScriptApi），整个页面另有一份不带脚本身份的（window.TavernHelper）。
 // 接口的名字、参数和返回值的形状照着酒馆助手 4.x 的公开类型声明来；实现是这里自己写的，读写的是轻酒馆的状态。
 import { state, eventSource, event_types, saveSettings, saveChat, saveCharacter, savePreset, saveWorld, loadWorld, refreshLists, activePersona, activeConnection, mvuEmitter } from '../state.js';
-import { api } from '../api.js';
+import { api, PROTOCOL } from '../api.js';
 import { getSession, refresh, setPreset as switchPreset, loadRelevantWorlds } from '../controller.js';
 import { generate as mainGenerate, stopGeneration, scriptGenerate, stopScriptGeneration, stopAllScriptGeneration, RAW_PROMPT_ORDER } from '../generate.js';
 import * as ops from '../chatops.js';
@@ -385,11 +385,13 @@ export function buildContext() {
     const cardData = state.char?.card?.data;
     const conn = state.settings.connections.length ? activeConnection() : null;
     const characters = state.char ? [{ ...cardData, data: cardData, avatar: state.char.file, name: cardData.name, chat: state.chat?.name ?? '' }] : [];
+    // 聊天头里没有 chat_metadata 就建一个挂上去：插件往里写的东西要能跟着聊天保存
+    const meta = state.chat?.header ? (state.chat.header.chat_metadata ??= {}) : {};
     const ctx = {
         chat,
         chatId: state.chat?.name ?? '',
-        chatMetadata: state.chat?.header?.chat_metadata ?? {},
-        chat_metadata: state.chat?.header?.chat_metadata ?? {},
+        chatMetadata: meta,
+        chat_metadata: meta,
         characterId: state.char ? 0 : undefined,
         this_chid: state.char ? 0 : undefined,
         characters,
@@ -413,7 +415,19 @@ export function buildContext() {
         callPopup: (content, type) => callGenericPopup(content, type === 'confirm' ? POPUP_TYPE.CONFIRM : type === 'input' ? POPUP_TYPE.INPUT : POPUP_TYPE.TEXT),
         getCurrentChatId: () => state.chat?.name ?? '',
         getChatCompletionModel: () => conn?.model ?? '',
-        getRequestHeaders: () => ({ 'Content-Type': 'application/json' }),
+        getRequestHeaders: () => ({ 'Content-Type': 'application/json', 'X-LT-Client': PROTOCOL, 'X-CSRF-Token': 'lite-tavern' }),
+        isGenerating: () => !!state.generating,
+        is_send_press: !!state.generating,
+        streamingProcessor: null,
+        extensionPrompts: s?.extensionPrompts ?? {},
+        setExtensionPrompt: (key, value, position = 1, depth = 4, scan = false, role = 0) => {
+            if (!s) return;
+            if (!value) delete s.extensionPrompts[key];
+            else s.extensionPrompts[key] = { value: String(value), position, depth, scan, role };
+        },
+        loadWorldInfo: async (name) => { const w = await loadWorld(String(name ?? ''), { force: true }); return w ? JSON.parse(JSON.stringify(w)) : null; },
+        saveWorldInfo: async (name, data) => { if (!name || !data) return; state.worlds[name] = data; saveWorld(name); },
+        get worldNames() { return state.worldList.map(w => w.name ?? w); },
         substituteParams: (t) => s?.substitute(String(t ?? '')) ?? String(t ?? ''),
         substituteParamsExtended: (t) => s?.substitute(String(t ?? '')) ?? String(t ?? ''),
         saveChat: () => saveChat({ now: true }),

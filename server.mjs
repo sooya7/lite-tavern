@@ -10,6 +10,7 @@ import { Router, HttpError, sendJson, sendText, readBody, readJson, serveFile, s
 import { Store, sanitizeName, defaultAvatar } from './server/store.mjs';
 import { proxyRequest } from './server/proxy.mjs';
 import { detectStDirs, scanStDir, importFromSt } from './server/st-import.mjs';
+import { registerStCompat, registerVectorApi, VectorStore, serveExtensionFile, csrfToken, EXT_URL_PREFIX } from './server/st-compat.mjs';
 import { flattenScriptTrees, scriptTreesOf } from './public/js/core/scripts.js';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -42,7 +43,10 @@ const config = {
     // 酒馆（SillyTavern / Luker）的用户数据目录：填了就和它共用角色卡、聊天、世界书、预设
     stData: String(args['st-data'] ?? process.env.LT_ST_DATA ?? ''),
     open: !!args.open,
+    // 酒馆第三方插件目录（每个子目录一个插件，和酒馆的 public/scripts/extensions/third-party 一样）；可以直接指向酒馆那份
+    extDir: '',
 };
+config.extDir = path.resolve(String(args['extensions-dir'] ?? process.env.LT_EXTENSIONS ?? path.join(config.data, 'extensions')));
 
 const isLocalHost = ['127.0.0.1', 'localhost', '::1'].includes(config.host);
 if (!isLocalHost && !config.password) {
@@ -228,6 +232,11 @@ router.post('/api/llm/:conn', async (req, res, { conn }) => {
     return undefined;
 });
 
+// ---------- 酒馆插件兼容接口 ----------
+registerStCompat(router, store, { extDir: config.extDir });
+// 向量存在轻酒馆自己的数据目录里（不和酒馆共用：酒馆那边的插件把向量放在浏览器里）
+registerVectorApi(router, new VectorStore(path.join(config.data, 'vectors')));
+
 // ---------- 酒馆导入 ----------
 router.get('/api/st/detect', async () => [...new Set([store.stData, ...detectStDirs()].filter(Boolean))]);
 router.post('/api/st/scan', async (req) => scanStDir((await readJson(req)).dir, store));
@@ -240,7 +249,9 @@ const server = http.createServer(async (req, res) => {
     try {
         if (pathname.startsWith('/api/')) {
             if (pathname !== '/api/login' && pathname !== '/api/ping' && !isAuthed(req)) throw new HttpError(401, '需要登录');
-            const writes = req.method !== 'GET' && req.method !== 'HEAD' && pathname !== '/api/login' && !pathname.startsWith('/api/llm/');
+            // 酒馆插件调的兼容接口不带轻酒馆的版本头，放行（世界书写入走插件自己的整本覆盖，和酒馆行为一致）
+            const readOnlyCompat = pathname.startsWith('/api/backends/') || pathname.startsWith('/api/vector/') || pathname === '/api/settings/get' || pathname.startsWith('/api/worldinfo/');
+            const writes = req.method !== 'GET' && req.method !== 'HEAD' && pathname !== '/api/login' && !pathname.startsWith('/api/llm/') && !readOnlyCompat;
             if (writes && req.headers['x-lt-client'] !== CLIENT_PROTOCOL) {
                 throw new HttpError(409, '页面是旧版本，请刷新页面后再操作（这次没有保存）', 'stale-client');
             }
@@ -250,7 +261,15 @@ const server = http.createServer(async (req, res) => {
             if (result !== undefined && !res.headersSent) sendJson(res, 200, result);
             return;
         }
+        if (pathname === '/csrf-token') {
+            if (!isAuthed(req)) throw new HttpError(401, '需要登录');
+            return csrfToken(res);
+        }
         if (req.method !== 'GET' && req.method !== 'HEAD') throw new HttpError(405, 'Method not allowed');
+        if (pathname.startsWith(EXT_URL_PREFIX)) {
+            if (!isAuthed(req)) throw new HttpError(401, '需要登录');
+            return serveExtensionFile(req, res, config.extDir, pathname);
+        }
         const rel = pathname === '/' ? '/index.html' : pathname;
         const file = safeJoin(PUBLIC, rel);
         if (!file) throw new HttpError(400, 'Bad path');

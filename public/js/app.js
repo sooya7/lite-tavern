@@ -13,6 +13,7 @@ import { setFrontendHandlers, refreshSnapshots, broadcastEvent } from './ui/fron
 import { importFiles } from './ui/importers.js';
 import { h, toast, modal } from './ui/dom.js';
 import { createUserMessage } from './core/chat.js';
+import { loadEnabledExtensions } from './ui/extensions.js';
 
 const app = document.getElementById('app');
 const scrim = document.getElementById('scrim');
@@ -180,6 +181,8 @@ async function boot() {
         }
     }
     refresh();
+    // 酒馆第三方插件（设置 › 酒馆插件 里打开的）：后台加载，不挡界面
+    loadEnabledExtensions();
 
     // 界面跟随事件更新
     for (const ev of [event_types.MESSAGE_SENT, event_types.MESSAGE_RECEIVED, event_types.MESSAGE_DELETED, event_types.CHAT_CHANGED]) {
