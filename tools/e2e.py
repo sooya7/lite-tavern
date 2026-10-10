@@ -694,7 +694,8 @@ def main():
             texts = [m['content'] for m in req]
             assert texts[-1] == '预设脚本加的一句', texts[-3:]
             assert any('注入的提示词' in t for t in texts), '脚本 injectPrompts 注入的提示词没进请求'
-            assert texts[0] == '生成数据事件加的一句', f'脚本在 GENERATE_AFTER_DATA 里换掉的消息数组没生效：{texts[0][:40]}'
+            # 交给脚本的消息只有 role / content / name（带着内部字段的话，合并相邻消息的脚本会失灵）
+            assert texts[0] == '生成数据事件加的一句', f'脚本在 GENERATE_AFTER_DATA 里换掉的消息数组没生效，或看到了多余字段：{texts[0][:60]}'
             assert texts[1].startswith('脚本预设的主提示词'), texts[1][:40]
             # 脚本放进“扩展设置”的界面在脚本面板里能看到、能展开
             right_tab('脚本')

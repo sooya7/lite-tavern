@@ -134,9 +134,9 @@ export async function generate(type = 'normal', opt = {}) {
         await ui.beforePrompt?.(session, type);
         prompt = await session.preparePrompt({ type, quietPrompt: opt.quietPrompt, excludeLast });
         if (prompt.worldInfo?.activated?.length) await eventSource.emit(event_types.WORLD_INFO_ACTIVATED, prompt.worldInfo.activated);
-        const evData = { chat: prompt.messages, dryRun: false, type };
+        const evData = { chat: plainMessages(prompt.messages), dryRun: false, type };
         await eventSource.emit(event_types.CHAT_COMPLETION_PROMPT_READY, evData);
-        prompt.messages = evData.chat;
+        prompt.messages = adoptMessages(prompt.messages, evData.chat);
     } catch (e) {
         console.error(e);
         toast(`组装提示词出错：${e.message}`, 'error');
@@ -150,9 +150,9 @@ export async function generate(type = 'normal', opt = {}) {
     // 发送前给脚本改请求的两次机会，顺序和酒馆一样：先 GENERATE_AFTER_DATA（{prompt: 消息数组}），再
     // CHAT_COMPLETION_SETTINGS_READY（消息 + 采样参数）。合并相邻消息、加前缀之类的预设脚本靠它们；
     // 新版酒馆（> 1.13.4）上这类脚本只听前一个，所以两个都要在拼请求体之前发，改动才算数
-    const afterData = { prompt: prompt.messages };
+    const afterData = { prompt: plainMessages(prompt.messages) };
     await eventSource.emit(event_types.GENERATE_AFTER_DATA, afterData, false);
-    if (Array.isArray(afterData.prompt)) prompt.messages = afterData.prompt;
+    prompt.messages = adoptMessages(prompt.messages, afterData.prompt);
     const genData = await settingsReady(conn, params, prompt.messages, session.names);
     prompt.messages = genData.messages;
     const req = buildRequest(conn, { messages: prompt.messages, prefill: prompt.prefill, params, names: session.names });
@@ -336,10 +336,23 @@ export function stopGeneration() {
     for (const g of scriptGens.values()) if (!g.silent) g.ac.abort();
 }
 
+/**
+ * 交给事件监听者的消息：和酒馆一样只有 role / content / name。轻酒馆自己给每条消息记的来源（source 等）不带出去——
+ * 合并相邻消息的脚本会比较两条消息除正文外是否相同，带着来源标记它就认为都不同、什么也不合并。
+ */
+const plainMessages = (messages) => messages.map(m => ({ role: m.role, content: m.content, ...(m.name ? { name: m.name } : {}) }));
+
+/** 监听者没动过就沿用原来那份（保留来源标记，提示词预览里还看得到每条是哪来的）；动过就用它改好的 */
+function adoptMessages(original, edited) {
+    if (!Array.isArray(edited)) return original;
+    const same = edited.length === original.length && edited.every((m, i) => m && m.role === original[i].role && m.content === original[i].content && (m.name || '') === (original[i].name || ''));
+    return same ? original : edited.filter(m => m && typeof m === 'object');
+}
+
 /** 发 CHAT_COMPLETION_SETTINGS_READY：监听者可以原地改 messages 和采样参数 */
 async function settingsReady(conn, params, messages, names) {
     const data = {
-        messages,
+        messages: plainMessages(messages),
         model: conn.model,
         temperature: params.temperature,
         frequency_penalty: params.frequency_penalty,
@@ -353,9 +366,9 @@ async function settingsReady(conn, params, messages, names) {
         char_name: names?.char ?? '',
         group_names: [],
     };
-    if (!eventSource.count(event_types.CHAT_COMPLETION_SETTINGS_READY)) return data;
+    if (!eventSource.count(event_types.CHAT_COMPLETION_SETTINGS_READY)) return { ...data, messages };
     await eventSource.emit(event_types.CHAT_COMPLETION_SETTINGS_READY, data);
-    if (!Array.isArray(data.messages)) data.messages = messages;
+    data.messages = adoptMessages(messages, data.messages);
     for (const k of ['temperature', 'frequency_penalty', 'presence_penalty', 'top_p', 'max_tokens']) {
         if (typeof data[k] === 'number' && !Number.isNaN(data[k])) params[k] = data[k];
     }
