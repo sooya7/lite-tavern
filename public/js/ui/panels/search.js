@@ -103,6 +103,7 @@ export const FEATURES = [
     { t: '显示思维链', tab: 'settings', find: '显示思维链', k: 'reasoning think 思考过程' },
     { t: '显示楼层号', tab: 'settings', find: '显示楼层号', k: 'message id 楼层' },
     { t: '渲染前端界面（状态栏 / 面板）', tab: 'settings', find: '渲染代码块里的前端界面', k: '前端卡 iframe 酒馆助手 html 美化' },
+    { t: '省电（暂停卡片动画）', tab: 'settings', find: '省电：卡片里循环播放的动画', k: '发热 发烫 耗电 电量 动画 卡顿 animation' },
     { t: 'Enter 发送', tab: 'settings', find: '电脑上按 Enter 发送', k: '回车 换行 快捷键' },
     { t: 'MVU 变量框架', tab: 'settings', find: 'MVU 变量框架', k: 'mvu 兼容' },
     { t: 'EJS 模板', tab: 'settings', find: '执行 EJS 模板', k: 'prompt template 提示词模板 兼容' },

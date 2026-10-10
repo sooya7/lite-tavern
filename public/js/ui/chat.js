@@ -12,6 +12,7 @@ import { renderHome } from './library.js';
 import { charAvatar, letterAvatar } from './avatars.js';
 import { applyMacroLikes } from './script-api.js';
 import { chatTitle, renameChat, exportChat, deleteChat } from './sidebar.js';
+import { poke } from './power.js';
 
 // 聊天页一次显示多少楼（设置 › 通用 › 外观，和酒馆的“加载消息数”一个意思）；0 = 全部
 const renderWindow = () => {
@@ -178,6 +179,8 @@ async function fillMessage(el, i, { streaming = false } = {}) {
         if (r) slot.append(r);
     }
     if (!streaming) {
+        // 排好版的新内容出现了：算一次活动，里面的动画先正常放（省电见 ui/power.js）
+        poke();
         await eventSource.emit(m.is_user ? event_types.USER_MESSAGE_RENDERED : event_types.CHARACTER_MESSAGE_RENDERED, i);
     }
     if (stickToBottom) scrollToBottom();

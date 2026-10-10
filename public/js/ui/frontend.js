@@ -3,10 +3,11 @@ import { h, toast } from './dom.js';
 import { state, eventSource } from '../state.js';
 import { messageText } from '../core/chat.js';
 import { setPath } from '../core/util.js';
+import { isIdle, onIdleChange, poke } from './power.js';
 
 // 前端卡运行时的版本号：改了 frontend-runtime.js 就改这里，iframe 才会用新的（平时走长期缓存，不用每个 iframe 都请求一次）
-const RT_V = '20261010h30';
-const frames = new Map(); // frameId → {iframe, messageId}
+const RT_V = '20261011h32';
+const frames = new Map(); // frameId → {iframe, messageId, ready, visible, paused}
 let nextId = 1;
 let handlers = {};
 
@@ -130,18 +131,81 @@ export function mountFrontend(html, wrap, messageId) {
     iframe.srcdoc = buildDoc(html, frameId, messageId);
     frames.set(frameId, { iframe, messageId });
     wrap.append(iframe);
+    seen?.observe(iframe);
+    // 出了新界面算一次活动：刚生成完的状态栏先正常放一会儿动画，没人碰再停
+    poke();
     return iframe;
 }
 
 /** 清理已从 DOM 移除的 iframe */
 function gc() {
-    for (const [id, f] of frames) if (!f.iframe.isConnected) frames.delete(id);
+    for (const [id, f] of frames) {
+        if (f.iframe.isConnected) continue;
+        seen?.unobserve(f.iframe);
+        frames.delete(id);
+    }
 }
+
+// ---------- 省电：界面不在屏幕里、或者页面静止时，暂停它里面循环播放的动画（见 ui/power.js） ----------
+// 状态栏这类界面多半带呼吸光晕、闪光条，一直放着手机就得一直重画。只暂停 CSS 动画，界面的脚本照常跑。
+
+/** 盯着每个界面在不在屏幕附近 */
+const seen = typeof IntersectionObserver === 'function' ? new IntersectionObserver((entries) => {
+    for (const e of entries) {
+        for (const [, f] of frames) {
+            if (f.iframe !== e.target) continue;
+            f.visible = e.isIntersecting;
+            syncPower(f);
+        }
+    }
+}, { rootMargin: '200px 0px' }) : null;
+
+/** 该停就让它停、该放就让它放。界面的运行时还没起来（ready 之前）先不发，起来之后会补 */
+function syncPower(f) {
+    if (!f.ready) return;
+    const paused = state.settings.ui?.pauseIdleAnim !== false && (isIdle() || f.visible === false);
+    if (f.paused === paused) return;
+    f.paused = paused;
+    f.iframe.contentWindow?.postMessage({ __lt: true, type: 'power', paused }, '*');
+}
+
+// 页面静止 / 恢复，或者设置里开关了省电（都经 power.js 的 applyPower 通知）：每个界面按新情况来
+onIdleChange(() => {
+    gc();
+    for (const [, f] of frames) syncPower(f);
+});
 
 export function broadcastEvent(name, ...args) {
     gc();
     for (const [, f] of frames) {
         f.iframe.contentWindow?.postMessage({ __lt: true, type: 'event', name, args, snapshot: buildSnapshot(f.messageId) }, '*');
+    }
+}
+
+/** 只发事件、不附聊天快照：聊天没变的时候用（卡片界面继续用它手里那份） */
+export function broadcastQuiet(name, ...args) {
+    gc();
+    for (const [, f] of frames) f.iframe.contentWindow?.postMessage({ __lt: true, type: 'event', name, args }, '*');
+}
+
+/**
+ * 流式生成途中：告诉卡片界面某一楼现在的文字。
+ * 长聊天的快照有几十万字，以前每次重绘都给每个界面发一整份，手机光是复制它就够忙的。现在：
+ *   - 每个界面在一次生成里只拿一次完整快照（那一楼是刚加的，它手里的快照里还没有），之后只发这一楼的文字；
+ *   - 运行时还没起来的界面（懒加载、还没滚进屏幕）不发——发了也没人收。它起来之后的第一次会拿到完整的。
+ * @param {object} gen 这次生成的标识（同一次生成传同一个对象）
+ */
+export function broadcastStreamText(name, messageId, text, gen) {
+    gc();
+    for (const [, f] of frames) {
+        if (!f.ready) continue;
+        const w = f.iframe.contentWindow;
+        if (f.streamGen === gen) {
+            w?.postMessage({ __lt: true, type: 'event', name, args: [text], patch: { message_id: messageId, message: text } }, '*');
+        } else {
+            f.streamGen = gen;
+            w?.postMessage({ __lt: true, type: 'event', name, args: [text], snapshot: buildSnapshot(f.messageId) }, '*');
+        }
     }
 }
 
@@ -227,6 +291,27 @@ window.addEventListener('message', async (e) => {
     }
     const frame = frameBySource(e.source);
     if (!frame) return;
+    if (d.type === 'ready') {
+        // 界面的运行时起来了：把现在该停还是该放告诉它
+        const f = frames.get(frame.id);
+        f.ready = true;
+        f.paused = undefined;
+        f.streamGen = null;
+        syncPower(f);
+        return;
+    }
+    if (d.type === 'resync') {
+        // 界面手里的快照跟不上了（只发文字时它找不到那一楼）：补一份完整的
+        const f = frames.get(frame.id);
+        f.streamGen = null;
+        e.source.postMessage({ __lt: true, type: 'snapshot', snapshot: buildSnapshot(f.messageId) }, '*');
+        return;
+    }
+    if (d.type === 'active') {
+        // 有人在界面里面点、划（隔着 iframe，页面自己收不到这些事件）
+        poke();
+        return;
+    }
     if (d.type === 'height') {
         const hgt = Math.min(Math.max(Number(d.height) || 0, 20), 6000);
         frame.iframe.style.height = `${hgt}px`;

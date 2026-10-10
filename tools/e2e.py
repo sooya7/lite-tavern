@@ -632,6 +632,129 @@ def main():
             assert 'lt_server_persisted' not in (m.get('extra') or {}), '刷新后页面在线，应由页面收尾'
         run('代生成：刷新页面后自动接回生成中的任务', server_gen_reload_resume)
 
+        # ---------- 省电（手机发热）：流式重绘的节奏、给前端卡的流式事件、静止 / 看不见时暂停卡片动画 ----------
+        anim = {}
+
+        def frame_of(k):
+            el = page.locator(f'#chat .mes[mesid="{k}"] iframe').element_handle(timeout=8000)
+            return el.content_frame()
+
+        def play_states(k):
+            return frame_of(k).evaluate("document.getAnimations().map(a => a.playState)")
+
+        def stream_pace():
+            send('ANIM 先来一个带动画的界面')
+            k = mes_count() - 1
+            anim['k'] = k
+            page.frame_locator(f'#chat .mes[mesid="{k}"] iframe').locator('#p').wait_for(timeout=8000)
+            # 数生成中的那一楼被重画了几次、各在什么时候
+            page.evaluate("""() => {
+                window.__paints = [];
+                window.__paintWatch = new MutationObserver((ms) => {
+                    if (ms.some(m => m.type === 'childList' && m.target.classList?.contains('mes_text') && m.target.closest('.mes.streaming'))) window.__paints.push(performance.now());
+                });
+                window.__paintWatch.observe(document.querySelector('#chat'), { childList: true, subtree: true });
+            }""")
+            page.fill('#send_textarea', 'SLOW 看看流式的节奏')
+            page.click('#send_but')
+            page.wait_for_selector('#send_but.stop', timeout=5000)
+            page.wait_for_timeout(2500)
+            mid = len(last_text())
+            wait_gen(60000)
+            paints = page.evaluate('window.__paints')
+            page.evaluate('window.__paintWatch.disconnect()')
+            t = last_text()
+            assert t.count('她慢慢合上书') == 20 and t.count('【结束】') == 1, f'流式结束后的内容不对：{t[-80:]!r}'
+            assert 0 < mid < len(t), f'生成途中屏幕上应该已经有一部分字（{mid} / {len(t)}）'
+            assert len(paints) >= 8, f'流式过程只重画了 {len(paints)} 次，不像是边生成边显示'
+            gaps = [b - a for a, b in zip(paints, paints[1:])]
+            fast = [round(g) for g in gaps if g < 150]
+            assert len(fast) <= 1, f'重画得太密（两次之间不到 150 毫秒的有 {len(fast)} 处：{fast[:8]}）'
+            span = (paints[-1] - paints[0]) / 1000
+            assert len(paints) - 1 <= span * 5.5 + 1, f'{span:.1f} 秒里重画了 {len(paints)} 次，超过每秒 5 次'
+            # 结束后那一楼是正式排好版的样子，过一会儿也不会被迟到的重画改回流式的样子
+            page.wait_for_timeout(1500)
+            assert page.locator('#chat .mes.streaming').count() == 0, '生成结束后还有楼层停在流式的样子'
+            assert last_text() == t, '生成结束后正文又被改了'
+            # 前端界面收到的流式事件：完整快照最多一两次（这次生成的头一次；上一楼重建时可能多一次），其余只带那一楼的文字，读到的内容对得上
+            pr = frame_of(k).evaluate('window.__probe')
+            assert pr['n'] >= 5, f'前端界面只收到 {pr["n"]} 次流式事件'
+            assert pr['full'] <= 2 and pr['patched'] >= pr['n'] - 2, f'流式事件还在带整份聊天：{pr}'
+            assert pr['bad'] == 0, f'前端界面在流式途中读到的最新一楼和事件里的文字对不上：{pr}'
+        run('省电：流式每秒最多重画 5 次，给前端卡的流式事件不再每次带整份聊天', stream_pace)
+
+        def stop_keeps_every_char():
+            # 重画变稀了，但点停止时保留的是收到的全部文字，不是屏幕上画到的那一截：和服务器停下时手里的那份对一下
+            aborted0 = mock('/count').get('ABORTED', 0)
+            got = {}
+            grab = lambda r: got.update(r.json()) if '/api/gen/' in r.url and r.url.endswith('/abort') else None
+            page.on('response', grab)
+            page.fill('#send_textarea', 'SLOW 停止时一个字都不少')
+            page.click('#send_but')
+            page.wait_for_selector('#send_but.stop', timeout=5000)
+            page.wait_for_timeout(2600)
+            page.click('#send_but')
+            page.wait_for_function("() => !document.querySelector('#send_but.stop')", timeout=10000)
+            page.wait_for_timeout(1200)
+            page.remove_listener('response', grab)
+            assert mock('/count').get('ABORTED', 0) > aborted0, '没有断开上游'
+            assert page.locator('#chat .mes.streaming').count() == 0, '停止后还有楼层停在流式的样子'
+            kept = chat_lines()[-1]['mes']
+            server = got.get('text', '')
+            assert '【结束】' not in kept and len(kept) > 60, f'停止后保留的内容不对：{kept[-60:]!r}'
+            assert server.startswith(kept), f'保留的不是服务器发过来的那一段：{kept[-40:]!r} / {server[-40:]!r}'
+            # 假模型每 120 毫秒发 6 个字；页面比服务器最多慢路上那一两块，不会因为“还没画到”再少
+            assert len(server) - len(kept) <= 12, f'服务器停下时有 {len(server)} 字，页面只保留了 {len(kept)} 字'
+            assert kept[-6:] in last_text(), '屏幕上最后显示的和存下来的对不上'
+        run('省电：中途停止时保留收到的全部文字', stop_keeps_every_char)
+
+        def idle_pause():
+            k = anim['k']
+            glow = "getComputedStyle(document.querySelector('#chat .mes[mesid=\"%d\"] .lt-e2e-glow')).animationPlayState" % k
+            scroll_to = lambda js: page.evaluate(js)
+            show = "document.querySelector('#chat .mes[mesid=\"%d\"] iframe').scrollIntoView({ block: 'center' })" % k
+            scroll_to(show)
+            page.mouse.move(300, 300)
+            page.wait_for_timeout(500)
+            assert play_states(k) == ['running'], f'界面在屏幕里、刚有操作，动画应该在放：{play_states(k)}'
+            assert page.evaluate(glow) == 'running'
+            # 滚出屏幕：马上停（不用等静止）；滚回来接着放
+            scroll_to("document.querySelector('#chat-scroll').scrollTop = 0")
+            page.wait_for_timeout(600)
+            off = page.evaluate("(() => { const r = document.querySelector('#chat .mes[mesid=\"%d\"] iframe').getBoundingClientRect(); return r.top - innerHeight; })()" % k)
+            assert off > 200, f'这个聊天太短，界面滚不出屏幕（离屏幕下沿 {off}px）'
+            assert play_states(k) == ['paused'], f'界面不在屏幕里，动画应该停：{play_states(k)}'
+            scroll_to(show)
+            page.wait_for_timeout(600)
+            assert play_states(k) == ['running'], f'界面回到屏幕里，动画应该接着放：{play_states(k)}'
+            # 关掉省电：滚出屏幕也不停
+            right_tab('外观与行为')
+            box = page.locator('#right label', has_text='省电').locator('input[type=checkbox]')
+            assert box.is_checked(), '省电默认应该开着'
+            box.uncheck()
+            scroll_to("document.querySelector('#chat-scroll').scrollTop = 0")
+            page.wait_for_timeout(600)
+            assert play_states(k) == ['running'], f'关掉省电后不该暂停：{play_states(k)}'
+            box.check()
+            page.wait_for_timeout(300)
+            assert play_states(k) == ['paused'], f'重新打开省电后，不在屏幕里的界面应该停：{play_states(k)}'
+            scroll_to(show)
+            page.mouse.move(320, 320)
+            page.wait_for_timeout(500)
+            assert play_states(k) == ['running'] and page.evaluate(glow) == 'running'
+            # 20 秒没有任何操作：正文里的动画和界面里的动画都停；动一下鼠标就接着放
+            page.wait_for_timeout(21500)
+            assert page.evaluate("document.body.classList.contains('lt-idle')"), '20 秒没操作，页面应该进入静止'
+            assert play_states(k) == ['paused'], f'静止后界面里的动画应该停：{play_states(k)}'
+            assert page.evaluate(glow) == 'paused', '静止后正文里的动画应该停'
+            page.mouse.move(340, 340)
+            page.wait_for_timeout(500)
+            assert not page.evaluate("document.body.classList.contains('lt-idle')"), '动了一下鼠标，应该恢复'
+            assert play_states(k) == ['running'] and page.evaluate(glow) == 'running', '恢复后动画应该接着放'
+            right_tab('提示词预览')
+            right_tab('连接')
+        run('省电：卡片动画不在屏幕里或 20 秒没操作时暂停，一动就恢复，设置里能关', idle_pause)
+
         def settings_groups():
             open_settings()
             groups = [t.strip() for t in page.locator('#right .panel-rail .tab').all_inner_texts()]

@@ -6,13 +6,14 @@ import { buildRequest, splitThinking, modelsPath, parseModelList } from './core/
 import { samplerParams, normalizePreset } from './core/preset.js';
 import { messageText } from './core/chat.js';
 import { sleep, uuid, clone } from './core/util.js';
+import { createPacer } from './core/pace.js';
 import { estimateTokens } from './core/tokens.js';
 import { toast } from './ui/dom.js';
 import { GenError, readLlmResponse, generateWithRetry } from './core/llm.js';
 import { separateReasoning, placeReply, placeLocated, locateReply, finalizeReply, wantsSeparateVars, applyReplyVars, messageFingerprint, persistedToLoad } from './core/reply.js';
 import * as mvuReq from './core/mvu-request.js';
 import { latestMvuVars, MVU_EVENTS } from './core/mvu.js';
-import { broadcastEvent } from './ui/frontend.js';
+import { broadcastEvent, broadcastQuiet, broadcastStreamText } from './ui/frontend.js';
 import { runGenerateInterceptors } from './ui/extensions.js';
 import { startJob, streamJob, cancelJob, claimJob, ackJob, activeJobs, kickStreams } from './genjob.js';
 
@@ -172,14 +173,23 @@ export async function generate(type = 'normal', opt = {}) {
     return completeReply(ctx, outcome);
 }
 
-/** 流式写进占位楼层（节流重绘） */
+// 流式重绘的节奏（core/pace.js）。每次重绘都要把整条回复重新排一遍版（Markdown → 清洗 → 换掉整块内容），回复越长越贵；
+// 以前固定 60 毫秒一次，七八千字的回复能把手机的主线程占满一分多钟，手机就是这么烫起来的。
+// 现在最快每秒 5 次；重绘一次花了 t 毫秒就至少歇 PAINT_REST × t。字还是实时出，只是一小段一小段地出。
+const PAINT_MIN_MS = 200;
+const PAINT_MAX_MS = 1000;
+const PAINT_REST = 6;
+
+/** 正在用的那个（页面回到前台时补画一次） */
+let livePainter = null;
+
+/**
+ * 流式写进占位楼层。收到的文字每次都记进消息里（点停止时保留的就是它，一个字不少），
+ * 画到屏幕上、通知脚本和卡片界面则按上面的节奏来；页面在后台时不画，回到前台补上。
+ */
 function makePainter(ctx) {
-    let lastPaint = 0;
-    return (text, reasoning, force = false) => {
-        const now = performance.now();
-        if (!force && now - lastPaint < 60) return;
-        lastPaint = now;
-        const { body, rsn } = separateReasoning(text, reasoning, ctx.think);
+    let body = '';
+    const pacer = createPacer(() => {
         if (ctx.type === 'impersonate' || ctx.type === 'quiet') {
             ui.setStatus?.(`生成中… ${estimateTokens(body)} tokens`);
             if (ctx.type === 'impersonate') ui.setComposerText?.(body);
@@ -187,13 +197,29 @@ function makePainter(ctx) {
         }
         const m = ctx.chat[ctx.targetIndex];
         if (!m) return;
-        m.mes = ctx.type === 'continue' ? ctx.baseText + body : body;
-        m.extra = { ...(m.extra ?? {}), reasoning: rsn || undefined };
         ui.updateStreaming?.(ctx.targetIndex);
         ui.setStatus?.(`生成中… ${estimateTokens(body)} tokens`);
-        broadcastEvent('js_stream_token_received_fully', m.mes);
+        // 卡片界面：每个界面这次生成只拿一次完整快照，之后只告诉它这一楼现在的文字
+        broadcastStreamText('js_stream_token_received_fully', ctx.targetIndex, m.mes, ctx);
         if (eventSource.count(event_types.STREAM_TOKEN_RECEIVED)) eventSource.emit(event_types.STREAM_TOKEN_RECEIVED, m.mes);
+    }, { minMs: PAINT_MIN_MS, maxMs: PAINT_MAX_MS, rest: PAINT_REST, hidden: () => typeof document !== 'undefined' && document.hidden });
+    const paint = (text, reasoning, force = false) => {
+        const sep = separateReasoning(text, reasoning, ctx.think);
+        body = sep.body;
+        if (ctx.type !== 'impersonate' && ctx.type !== 'quiet') {
+            const m = ctx.chat[ctx.targetIndex];
+            if (!m) return;
+            m.mes = ctx.type === 'continue' ? ctx.baseText + body : body;
+            m.extra = { ...(m.extra ?? {}), reasoning: sep.rsn || undefined };
+        }
+        pacer.request(force);
     };
+    /** 还有没画上去的就现在画（页面回到前台时） */
+    paint.flush = () => pacer.flush();
+    /** 生成结束 / 重试从头来：到点要画的那一下作废 */
+    paint.cancel = () => pacer.cancel();
+    livePainter = paint;
+    return paint;
 }
 
 /** 浏览器直接请求（旧服务端、代我写、静默生成） */
@@ -201,7 +227,7 @@ async function runLocal(ctx, req) {
     const r = await generateWithRetry(() => requestOnce(ctx.conn, req, ctx.ac.signal, ctx.paint), {
         retry: state.settings.retry ?? {},
         signal: ctx.ac.signal,
-        onRetry: (n) => ui.setStatus?.(`第 ${n} 次重试…`),
+        onRetry: (n) => { ctx.paint.cancel(); ui.setStatus?.(`第 ${n} 次重试…`); },
         log: (e) => console.warn('[生成] 失败', e),
     });
     return { result: r.result, error: r.error, aborted: ctx.ac.signal.aborted };
@@ -247,6 +273,7 @@ async function followJob(ctx) {
             // 服务器在重试：这次从头再来
             text = '';
             reasoning = '';
+            ctx.paint.cancel();
         } else if (ev.type === 'status') {
             ui.setStatus?.(ev.text);
         } else if (ev.type === 'persisting') {
@@ -295,8 +322,15 @@ function claimHeartbeat(jobId, onTaken) {
     return () => clearInterval(timer);
 }
 
+/** 流式那一段结束了：还没到点的那一下重绘作废（不然它会在正式排好版之后又把这一楼画回流式的样子） */
+function stopPainting(ctx) {
+    ctx.paint?.cancel();
+    if (livePainter === ctx.paint) livePainter = null;
+}
+
 /** 生成结束：放开生成状态、刷新界面 */
 function endGeneration(ctx) {
+    stopPainting(ctx);
     state.generating = false;
     state.abort = null;
     ui.setGenerating?.(false);
@@ -313,6 +347,7 @@ async function completeReply(ctx, outcome) {
     const { session, conn, type, chat, removedForRegen, started, ac, jobId } = ctx;
     const targetIndex = ctx.targetIndex;
     const baseText = ctx.baseText;
+    stopPainting(ctx);
     if (outcome.persisted) return adoptServerReply(ctx);
     let result = outcome.result ?? null;
     const lastErr = outcome.error ?? null;
@@ -559,7 +594,8 @@ async function afterChatOpened() {
 // 页面回到前台、网络恢复：断掉的流马上重连；没在生成时看看服务器上有没有这个聊天的任务
 if (typeof document !== 'undefined') {
     const wake = () => { kickStreams(); resumeActiveJobs(); };
-    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') wake(); });
+    // 在后台时流式不往屏幕上画，回来先把攒下的画上
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { livePainter?.flush(); wake(); } });
     window.addEventListener('online', wake);
     window.addEventListener('pageshow', (e) => { if (e.persisted) wake(); });
 }
@@ -812,8 +848,9 @@ export async function scriptGenerate(config = {}, { raw = false } = {}) {
         last = text;
         eventSource.emit('js_stream_token_received_fully', text, id);
         eventSource.emit('js_stream_token_received_incrementally', inc, id);
-        broadcastEvent('js_stream_token_received_fully', text, id);
-        broadcastEvent('js_stream_token_received_incrementally', inc, id);
+        // 脚本自己发起的生成不写聊天，卡片界面手里的聊天快照没变：只发事件，不再每个字都附一整份聊天
+        broadcastQuiet('js_stream_token_received_fully', text, id);
+        broadcastQuiet('js_stream_token_received_incrementally', inc, id);
     };
     try {
         const send = () => (custom

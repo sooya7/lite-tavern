@@ -411,6 +411,9 @@ a { color: var(--accent); }
 .mes-edit .textarea { min-height: 120px; font-size: 15px; border-radius: 14px; padding: 12px 14px; background: var(--field); }
 .mes-edit .row { margin-top: 8px; justify-content: flex-end; }
 .frontend-frame { width: 100%; border: 0; display: block; background: transparent; min-height: 20px; color-scheme: normal; }
+/* 省电：页面静止（一段时间没人操作，见 ui/power.js）时，消息正文里循环播放的动画先停，一碰屏幕就接着放。
+   卡片的美化常带呼吸光晕、闪光条，一直放着手机会烫。生成中那个小圆点是 .mes_text 自己的 ::after，不在此列 */
+body.lt-idle #chat .mes_text *, body.lt-idle #chat .mes_text *::before, body.lt-idle #chat .mes_text *::after { animation-play-state: paused !important; }
 .frontend-wrap { margin: .6em 0; }
 .mes .mes_text > .frontend-wrap:first-child { margin-top: 0; }
 .ejs-error { color: var(--danger); font-size: 12px; }

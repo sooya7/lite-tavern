@@ -8,6 +8,8 @@
 //   流式回复没发完就被断开时计数 ABORTED（测停止按钮确实断开了上游、页面断开时服务器没断开上游）
 //   MVU         回复里带 <UpdateVariable> JSONPatch
 //   HTML        回复里带一个完整 HTML 前端代码块
+//   ANIM        回复里带一段循环动画的美化（<style>）和一个带循环动画的前端代码块；那个前端界面同时记下它收到的流式事件
+//               （window.__probe = {n 收到几次, full 带完整快照的几次, patched 只带这一楼文字的几次, bad 读到的最新一楼和事件里的文字对不上的次数}）
 //   THINK       回复以 <think>…</think> 开头
 // GET /last 返回最近一次收到的请求（路径 + 请求体），GET /count 返回各关键字已触发次数
 import http from 'node:http';
@@ -40,6 +42,14 @@ function makeReply(text) {
     }
     if (/HTML/.test(text)) {
         parts.push('\n\n```html\n<!doctype html><html><head><style>body{font-family:sans-serif;color:#c96}.box{padding:8px;border:1px solid #c96;border-radius:8px}</style></head><body><div class="box" id="b">加载中</div><script>\nconst v = getAllVariables();\ndocument.getElementById("b").textContent = "前端卡：楼层 " + getCurrentMessageId() + "，好感度 " + JSON.stringify(_.get(v, "stat_data.好感度"));\n</script></body></html>\n```');
+    }
+    if (/ANIM/.test(text)) {
+        parts.push('\n\n<style>.lt-e2e-glow{display:inline-block;animation:lt-e2e-glow 2s ease-in-out infinite}@keyframes lt-e2e-glow{50%{opacity:.4}}</style><span class="lt-e2e-glow">微光</span>');
+        parts.push('\n\n```html\n<!doctype html><html><head><style>.box{padding:8px;animation:breathe 3s ease-in-out infinite}@keyframes breathe{50%{opacity:.5}}</style></head><body><div class="box" id="p">探针</div><script>\n'
+            + 'const st = window.__probe = { n: 0, full: 0, patched: 0, bad: 0 };\n'
+            + 'window.addEventListener("message", (e) => { const d = e.data; if (d && d.__lt && d.type === "event" && d.name === "js_stream_token_received_fully") { st.n++; if (d.snapshot) st.full++; if (d.patch) st.patched++; } });\n'
+            + 'eventOn("js_stream_token_received_fully", (t) => { const m = getChatMessages(-1)[0]; if (!m || m.message !== t) st.bad++; });\n'
+            + '</script></body></html>\n```');
     }
     if (/SLOW/.test(text)) parts.push('\n\n' + '她慢慢合上书，把它放回书架。'.repeat(20) + '【结束】');
     const body = parts.join('');

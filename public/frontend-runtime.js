@@ -61,11 +61,25 @@
             chatInput = String(d.value ?? '');
         } else if (d.type === 'snapshot') {
             snap = d.snapshot;
+        } else if (d.type === 'power') {
+            // 省电：界面不在屏幕里、或者页面静止了，宿主让这里循环播放的动画先停一停（脚本照常跑）
+            if (d.paused) document.documentElement.setAttribute('data-lt-paused', '');
+            else document.documentElement.removeAttribute('data-lt-paused');
         } else if (d.type === 'event') {
             if (d.snapshot) snap = d.snapshot;
+            // 流式生成途中宿主不再每次发整份聊天，只说“这一楼现在是这些字”
+            else if (d.patch) patchMessage(d.patch);
             emitLocal(d.name, ...(d.args || []));
         }
     });
+
+    function patchMessage(p) {
+        const m = (snap.chat || []).find(x => x.message_id === p.message_id);
+        // 手里的快照里没有这一楼（不该发生：宿主会先发一份完整的）：请宿主补一份
+        if (!m) { post({ type: 'resync' }); return; }
+        m.message = String(p.message ?? '');
+        if (Array.isArray(m.swipes) && m.swipes.length > (m.swipe_id || 0)) m.swipes[m.swipe_id || 0] = m.message;
+    }
 
     function emitLocal(name, ...args) {
         for (const fn of [...(listeners.get(name) || [])]) {
@@ -437,4 +451,23 @@
     });
     document.addEventListener('DOMContentLoaded', report);
     window.addEventListener('error', (e) => { post({ type: 'error', message: String(e.message || e.error) }); });
+
+    // ---------- 省电 ----------
+    // 暂停用属性选择器挂在 <html> 上（卡片改 className 也冲不掉）；只动 animation-play-state，恢复时接着刚才的地方放
+    try {
+        const st = document.createElement('style');
+        st.textContent = 'html[data-lt-paused] *, html[data-lt-paused] *::before, html[data-lt-paused] *::after { animation-play-state: paused !important; }';
+        (document.head || document.documentElement).appendChild(st);
+    } catch (e) { /* 加不上就不暂停 */ }
+    // 在界面里点、划也算“有人在操作”，告诉宿主（最多一秒一次）
+    let lastActive = 0;
+    const active = () => {
+        const now = Date.now();
+        if (now - lastActive < 1000) return;
+        lastActive = now;
+        post({ type: 'active' });
+    };
+    for (const ev of ['pointerdown', 'touchstart', 'keydown', 'wheel']) window.addEventListener(ev, active, { capture: true, passive: true });
+    // 运行时起来了：宿主收到后告诉这里现在该不该暂停
+    post({ type: 'ready' });
 })();

@@ -15,6 +15,7 @@ import { importFiles } from './ui/importers.js';
 import { h, toast, modal } from './ui/dom.js';
 import { createUserMessage } from './core/chat.js';
 import { loadEnabledExtensions } from './ui/extensions.js';
+import { initPower } from './ui/power.js';
 
 const app = document.getElementById('app');
 const scrim = document.getElementById('scrim');
@@ -156,6 +157,7 @@ async function boot() {
     initDrop();
     renderComposer();
     initScrollTracking();
+    initPower();
 
     try { state.secrets = await api.getSecrets(); } catch { state.secrets = {}; }
     await refreshLists();

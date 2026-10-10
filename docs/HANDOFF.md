@@ -1,6 +1,6 @@
 # 轻酒馆 交接文档
 
-更新：2026-10-10（页面版本 20261010h22；本轮加了服务器代生成，见 3.8 节）
+更新：2026-10-11（页面版本 20261011h32；本轮：手机发热的三处优化见 3.9 节，“聊天每秒重新载入一次”的 bug 见 3.8 节第 7 步）
 
 ## 1. 项目是什么
 
@@ -115,6 +115,8 @@ docs/HANDOFF.md         本文档
 
 **开场白里的 `<initvar>`（2026-10-10，h31，起因是同一张卡“确认检票没有反应”）**：多开场的卡让每个开场白自带一个 `<initvar>` 块当这个开场的初始变量。MVU 的规则（`variable_init.ts`）：某个 swipe 带了这个块，这个 swipe 的 `stat_data` 就以块里的内容为准，角色主世界书的 `[initvar]` 不用，其余世界书的 `[initvar]` 照常补上（顶层同名的听开场白的），然后再应用这个 swipe 里的 `<UpdateVariable>`。之前 `ensureMvuInit` 只读世界书，五个开场的变量全一样；那张卡的脚本在检票前会核对“目标开场的变量和路线对不对得上”，于是只有默认路线能过，另外两条路线被它拒绝（界面上“确认检票”按钮下面一行小字：“目标开场的已有变量与路线不符”，用户的说法是“没有反应”）。现在 `core/mvu.js` 的 `greetingInitVars` + `ensureMvuInit` 按 MVU 的规则做。**只管新建的聊天**：修之前建的聊天里首楼变量已经写好了，不会回头改，要重开一个聊天。117 上用真卡验证过：在这张卡下新开临时聊天（验完删掉，用户原来的聊天没动），手机尺寸 + 触摸点按，三条路线都能检票成功，五个开场的变量各是各的
 
+**流式生成时的三条规矩（2026-10-11，h32，详见 3.9 节）**：收到的文字每次都记进 `m.mes`，但画到屏幕上按 `core/pace.js` 的节奏；给前端卡的流式事件用 `broadcastStreamText`（不带整份聊天）；生成结束 / 重试时先 `stopPainting`，不然迟到的那一下重画会把排好版的楼层画回流式的样子。
+
 ### 聊天和角色卡的流量（2026-10-10）
 
 - 保存聊天只传改动：`PATCH /api/chats/:char/:name`，体为 `{baseCount, count, set: {行号: 整行}, edit: {行号: 字段级操作}}`，带 `X-Expect` 版本号。前端拿上次读 / 写时的各行（`chat.base`）对比，新楼层整行、改过的楼层按字段（`core/jsondiff.js`，参照 Luker 的 JSON Patch 做法）。服务端行数对不上回 409 `patch-base`，前端自动退回整份 `PUT`
@@ -218,7 +220,7 @@ docs/HANDOFF.md         本文档
 4. 收到 `done`：页面先 `POST /claim`（宽限期从现在重新算），收尾期间每 5 秒再认领一次（额外模型解析可能要十几秒），然后照常走前端收尾，**带 `X-LT-Gen-Job` 头保存聊天 = 确认**（`state.js` 的 `saveChatForJob`）。确认和保存是同一个请求，在聊天的写入锁里（`store.withChatLock`）先核对任务状态再写，所以不会出现页面和服务器都写
 5. 宽限期（默认 15 秒，`--gen-grace <毫秒>` 或 `LT_GEN_GRACE_MS`；`/api/ping` 的 `genGraceMs`）内没确认：服务器 `persistReply`（`server/gen-persist.mjs`）自己写进聊天文件，用的是 `public/js/core` 同一套代码：`buildServerSession` 按页面规则读设置、角色卡、预设、用户设定、相关世界书（`core/reply.js` 的 `relevantWorldNames` / `personaOf`，页面的 `loadRelevantWorlds` / `activePersona` 也改用它们）→ `locateReply` 找位置 → `placeLocated` 放占位 → 拆思维链（`separateReasoning`）→ `finalizeReply`（永久正则、正文、时间按页面时区、extra、swipe）→ 额外模型解析（`core/mvu-request.js`，同样的开关 / 请求内容模式 / 请求策略 / 高级参数 / 连接选择，角色卡 `[config_override]` 覆盖经 `session.mvuSettings()` 生效）→ `applyReplyVars`（随 AI 输出解析、写进这一楼这个 swipe 的 `variables`、状态栏占位符、同步到聊天变量、自动清理）。写之前在写入锁里核对版本：算的过程中聊天被写过就读最新的，把算好的这一楼放进去
 6. 服务器写的楼层打标记 `extra.lt_server_persisted = {job, type, at, pending: true, mvu, reasoning?, orphan?, warnings?}`（swipe 的话也在那个 swipe 的 `swipe_info[].extra` 里）。页面下次打开这个聊天（`CHAT_CHANGED` 后等脚本对齐好）由 `replayServerReplies` 补发：MVU 开着时发 `mag_variable_update_ended`（参数是这一楼存好的变量和上一楼的变量，监听者原地改了照常保存）和 `_for_zod`，然后 `stream_reasoning_done`（有思维链时）、`MESSAGE_RECEIVED`，前端卡收到 `message_received` / `js_generation_ended` / `mag_variable_update_ended`。**不重新解析变量**。补发后 `pending` 改成 false，标记留着
-7. 找回：打开聊天、回到前台、网络恢复时 `GET /api/gen/active?char=&chat=`（`resumeActiveJobs`）。有生成中 / 等确认 / 服务器写失败的任务：按 `target` 在本地聊天里放好占位，从 seq 0 收流，收齐后照常由页面收尾（刷新页面也能接回来）；服务器正在写：等它写完载入；服务器刚写完而本地是旧的：重新载入。页面带任务号保存时服务器已经写过（或别的窗口已经确认过）返回 409 `gen-persisted`，页面丢掉本地占位、载入服务器那份
+7. 找回：打开聊天、回到前台、网络恢复时 `GET /api/gen/active?char=&chat=`（`resumeActiveJobs`）。**“服务器刚写完而本地是旧的”怎么判断（2026-10-11 修的 bug）**：服务器写过的任务在这个列表里留两小时，而它写的那一楼可能后来被重新生成、删掉、或者被“用这边的覆盖”盖掉了——只看“聊天里找不到它写的楼层”会一直判成旧的，于是 载入聊天 → `CHAT_CHANGED` → 再查 → 再载入，每秒一圈停不下来（每圈重读整份聊天、重启卡片脚本、再保存一次，还不断撞出“这个聊天在别处被改过了”）。现在由 `core/reply.js` 的 `persistedToLoad` 判断：手里这份聊天的版本（`修改时间-字节数`）不比服务器写完时的旧就不载入，并且每个任务最多载入一次（`generate.js` 的 `reloadedFor`）。以后动这段逻辑，记住“找不到 ≠ 没看到”，任何“发现不对就重新载入”的路径都要保证只走一次。有生成中 / 等确认 / 服务器写失败的任务：按 `target` 在本地聊天里放好占位，从 seq 0 收流，收齐后照常由页面收尾（刷新页面也能接回来）；服务器正在写：等它写完载入；服务器刚写完而本地是旧的：重新载入。页面带任务号保存时服务器已经写过（或别的窗口已经确认过）返回 409 `gen-persisted`，页面丢掉本地占位、载入服务器那份
 8. 停止：页面断开 SSE 并 `POST /abort`，保留本地已显示的部分（行为和以前一样）；已经收齐的任务被停止时也不再由服务器写。被别的窗口停掉的任务当作停止
 
 **写入位置**（`locateReply`）：先找带任务号的占位；否则核对 `anchor`，normal 要求文件正好 `index` 条（或 `index + 1` 条且最后一条是 `replace`）、swipe 要求那一楼的 swipe 数等于 `swipeId`、continue 要求那一楼的正文还是 `baseText`。对不上（别处删改过楼层）就把回复作为新的一条加到末尾并标 `orphan`，宁可多一条也不丢
@@ -244,6 +246,26 @@ docs/HANDOFF.md         本文档
 - 代我写、静默生成、脚本自己的 `generate` / `generateRaw` 不写聊天，仍由浏览器直接请求（切后台会断）
 - 同一个聊天在两个窗口都开着时，两个窗口都会接着显示并各自收尾（额外模型解析会请求两次），先保存的算数，后保存的载入它
 
+## 3.9 省电：手机发热的三处（2026-10-11，页面版本 h32）
+
+起因：用户说“开久了手机会烫”。看代码加实测（无头 Chromium、手机尺寸、CPU 降到四分之一、49 楼的聊天、一条 8000 字的回复按真实速度流出来），页面一直在干三件事：
+
+**1. 流式重绘太勤**。每次重绘都把整条回复重新排版（showdown → DOMPurify → 换掉整块 `innerHTML` → 滚到底时强制布局），以前固定 60 毫秒一次。现在按 `core/pace.js` 的 `createPacer`：最快 200 毫秒一次；画一次花了 t 毫秒就至少歇 6t（封顶 1 秒）；等的时候来的内容到点补画最新的；页面在后台不画，回到前台补（`generate.js` 的 `livePainter.flush()`）。`makePainter` 里**每个增量都更新 `m.mes`**（点停止时保留的是它，不是屏幕上画到的那一截），只有“画”和“通知脚本 / 前端卡”走节奏。实测页面主线程忙的时间 36.3 秒 → 12.8 秒（51 秒的生成里从 71% 降到 25%），重绘 671 次 → 198 次。
+
+**2. 每次重绘给每个前端卡发一整份聊天**。`broadcastEvent` 每次都 `buildSnapshot`（49 楼约 28 万字）再 postMessage 复制过去。现在流式途中用 `broadcastStreamText(name, 楼层, 文字, gen)`：每个界面在一次生成里只拿一次完整快照（占位楼层是刚加的），之后只带 `patch: {message_id, message}`，运行时改自己手里那份（`patchMessage`）；运行时还没起来的界面（懒加载、没滚进屏幕）不发；补丁对不上时运行时回 `resync`，宿主补一份完整的。脚本自己发起的生成（不写聊天）用 `broadcastQuiet`，不带快照。别的事件照旧带完整快照——它们不频繁。
+
+**3. 卡片里循环播放的动画一直在放**。状态栏这类界面常带呼吸光晕、闪光条（「绿皮车37小时」的状态栏有 5 个 `infinite` 动画，两个在动 `box-shadow`），页面开着不动也得一直重画：实测那个界面所在的进程有 23–25% 的时间在忙。现在：
+- `ui/power.js`：20 秒（`IDLE_MS`）没有触摸 / 鼠标 / 按键 / 滚轮就算“静止”，`<body>` 加 `lt-idle`；有操作、或者出了新内容（`poke()`：排好版的楼层、新挂的前端卡）立刻恢复。**不听 scroll**（生成时页面自己往下滚也触发）。静止之后不留定时器。
+- 消息正文里的动画：`body.lt-idle #chat .mes_text *` 设 `animation-play-state: paused`（`css/app.css`）。生成中的小圆点是 `.mes_text::after`，不受影响。
+- 前端卡 iframe：`ui/frontend.js` 用 IntersectionObserver 看每个界面在不在屏幕附近；不在屏幕里**或者**页面静止，就发 `{type: 'power', paused: true}`，运行时在 `<html>` 上挂 `data-lt-paused`（它自己注入的样式把动画暂停；用属性是因为卡片会改 className）。运行时起来后先发 `ready`，宿主这时才告诉它该停还是该放（之前发的收不到）；在界面里点、划会发 `active`（最多一秒一次），算作操作。
+- 只暂停 CSS 动画，不碰卡片的脚本、定时器、rAF。开关在 设置 › 通用 › 外观与行为 的“省电”（`settings.ui.pauseIdleAnim`，默认开）。实测静止后那个进程忙的时间从 25% 降到 0，点一下屏幕动画接着放。
+
+**改运行时要记得**：`frontend-runtime.js` 一动就改 `ui/frontend.js` 的 `RT_V`（这次是 `20261011h32`）。宿主 ↔ 运行时现在多了四种消息：`ready` / `active` / `resync`（界面 → 宿主），`power`（宿主 → 界面），以及事件里的 `patch`。
+
+**没量到的**：以上数字是无头 Chromium 的主线程时间，不是真机的温度和耗电；iPhone Safari 对屏幕外 iframe 里的动画怎么处理没有实测。聊天越长，生成结束时那几次完整快照（`message_received` 等）还是会发，只是不再每次重绘都发。
+
+**还能再省的（没做）**：流式重绘仍是整条重排，只是次数少了。要再降就得做“前面没变的段落不动、只重排最后一段”，要处理跨段的代码块 / `<details>` / `<style>`，等真觉得不够再说。
+
 ## 4. 数据与兼容约定
 
 - 数据目录结构与酒馆对应：`characters/*.png`、`chats/<角色>/*.jsonl`、`presets/*.json`、`worlds/*.json`、`avatars/`；另有 `settings.json`、`secrets.json`、`backups/`、`trash/`
@@ -254,6 +276,7 @@ docs/HANDOFF.md         本文档
 
 ## 5. 当前状态（已验证的部分）
 
+- 2026-10-11 省电（h32）+ 聊天反复重新载入的修复：单测 56/56（新增 `test/pace.test.mjs` 4 项、`gen-jobs` 1 项），端到端 44/44（新增 4 项：服务器写的那条被重新生成后不反复载入、流式每秒最多重画 5 次且给前端卡的事件不带整份聊天、中途停止保留收到的全部文字、动画在屏幕外 / 静止时暂停）。共用实例那 5 项这次没跑（没动那部分）。新加的“不反复载入”在旧代码上是失败的（4 秒里载入了 24 次）
 - 2026-10-10 开场白里的 `<initvar>`（h31）：单测 51/51（新增 1 项），端到端 45/45
 - 2026-10-10 前端卡借父页面叫脚本（h30）：单测 50/50，端到端连共用实例 45/45（新增 1 项）
 - 2026-10-10 服务器代生成（h22）：单测 45/45（新增 `test/gen-jobs.test.mjs` 7 项）；端到端 42/42（新增 6 项：页面在线时由页面收尾、断网后按 seq 续传不丢不重字、生成中关掉页面后服务器写完回复和随 AI 输出的变量并在重开后补发事件、页面在线 / 停止时服务器不再写、额外模型解析的变量由服务器算好、刷新页面后接回生成中的任务；“中途停止”还检查了上游确实被断开）。端到端里关页面的两项要等宽限期，各约 28 秒。**只在本地测过，没有部署到 117**；真机 iPhone 后台 / 锁屏没试过
@@ -296,7 +319,8 @@ docs/HANDOFF.md         本文档
   - 斜杠命令补了：音频 6 个、`impersonate stop abort return flushvar flushglobalvar listvar len upper lower trim tokens add sub mul div mod pow max min abs round floor ceil rand input popup confirm buttons delay inject listinjects flushinject model preset go/char persona getchatname closechat bg addswipe delswipe getentryfield setentryfield findentry createentry`。没有：带 `{: :}` 闭包的流程控制（`if`、`while`、`times`、`run`）、快速回复
   - 页面结构只对齐了 3.5 节列的那几个选择器。脚本去找酒馆页面上别的东西（`#top-bar`、`#completion_prompt_manager`、酒馆的弹窗 DOM）会找不到；一般表现为那部分功能没反应，不影响别的
   - `generate` 的 `overrides` 只支持角色描述 / 性格 / 场景 / 用户设定 / 示例对话 / `chat_history.prompts`，世界书的两个覆盖只在 `generateRaw` 里生效
-- 提示词模板（EJS）实现了常用 API，冷门函数可能缺
+- 提示词模板（EJS）实现了常用 API，冷门函数可能缺。2026-10-11 在 117 的日志里看到：「绿皮车37小时」有 12 条世界书的 `@@if` 用了 `findVariables`，服务器代写时每次都报 `findVariables is not defined`（代码里哪边都没有这个函数；浏览器里是不是由卡片脚本挂的全局没查）。这些条目在服务器做额外模型解析时按原文处理
+- 2026-10-11 没查清的一件事：00:20–00:21 同一个聊天每 5 秒一圈 `POST /api/gen` 409（`gen-busy`）→ `ack` 404 → `gen/active` → 重收一遍旧任务的流 → 保存，连着 5 圈；当时用户刚点过停止（`abort`）。不知道是用户连点重新生成，还是停止之后任务没有及时离开 busy 状态。服务重启后任务都没了，没法再看；再出现时先看那个任务的 `status`
 - token 数是估算（没有真实分词器）
 - 前端卡 iframe 是无同源沙箱（origin 为 null），卡里直接 fetch 第三方图床（如某张卡用的 r2.dev）会被对方的 CORS 拦掉
 - 缩略图不支持隔行扫描 PNG 和非 PNG 头像，遇到时自动退回原图
