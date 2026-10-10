@@ -264,8 +264,9 @@ def main():
         run('密钥不回传浏览器', secret_not_leaked)
 
         def import_card():
+            page.locator('#chat .home-actions button', has_text='导入角色卡').click()
             with page.expect_file_chooser() as fc:
-                page.locator('#chat .home-actions button', has_text='导入角色卡').click()
+                page.locator('.menu button', has_text='从文件导入').click()
             fc.value.set_files(FIXTURE)
             page.wait_for_selector('#chat .mes[mesid="0"]', timeout=10000)
             page.wait_for_timeout(1200)
@@ -776,8 +777,22 @@ def main():
             page.locator('#left button', has_text='首页').first.click()
             page.wait_for_selector('#chat .home-wrap')
             page.locator('#chat .home-tab', has_text='角色库').click()
+            # “导入”点开是两项：从文件、从 Discord 链接
+            page.locator('#chat .home-tab-actions button', has_text='导入').click()
+            labels = [t.strip() for t in page.locator('.menu button').all_inner_texts()]
+            assert labels == ['从文件导入', '从 Discord 链接导入'], labels
+            # 链接贴得不对：说明该贴什么，不多出卡
+            n_cards = len(js("fetch('/api/characters').then(r => r.json())"))
+            page.locator('.menu button', has_text='从 Discord 链接导入').click()
+            page.wait_for_selector('.modal input.input', timeout=5000)
+            page.fill('.modal input.input', 'https://example.com/card.png')
+            page.locator('.modal-foot button', has_text='确定').click()
+            page.wait_for_selector('#toasts .toast >> text=只支持 Discord 附件的链接', timeout=8000)
+            assert len(js("fetch('/api/characters').then(r => r.json())")) == n_cards
+            page.locator('#toasts .toast', has_text='只支持 Discord').click()
+            page.locator('#chat .home-tab-actions button', has_text='导入').click()
             with page.expect_file_chooser() as fc:
-                page.locator('#chat .home-tab-actions button', has_text='导入').click()
+                page.locator('.menu button', has_text='从文件导入').click()
             fc.value.set_files(SCRIPT_CARD)
             page.wait_for_selector('#toasts .toast >> text=已导入角色「脚本测试卡」', timeout=10000)
             tip = page.locator('#toasts .toast', has_text='已导入角色「脚本测试卡」').inner_text()

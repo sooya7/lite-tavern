@@ -187,18 +187,8 @@ async function updateChar(c) {
  */
 async function updateCharFromUrl(c) {
     if (updateBlocked(c)) return;
-    const url = await promptDialog('粘贴卡片文件的链接：\n在 Discord 里长按（电脑上右键）那个卡片文件，选“复制链接”。', '', { title: `从链接更新「${c.name}」`, placeholder: 'https://cdn.discordapp.com/attachments/…' });
-    if (!url?.trim()) return;
-    const tip = toast('正在下载…', 'info', 60000);
-    let f;
-    try {
-        f = await api.fetchCardUrl(url.trim());
-    } catch (e) {
-        toast(`没下下来：${e.message}`, 'error', 8000);
-        return;
-    } finally {
-        tip?.remove?.();
-    }
+    const f = await downloadCardFromLink(`从链接更新「${c.name}」`);
+    if (!f) return;
     await applyCardUpdate(c, f);
 }
 
@@ -275,9 +265,40 @@ async function deleteChar(c) {
     }
 }
 
-export async function onImport() {
+/** “导入”按钮：点开选从文件还是从链接（入口还是这一个，不另外加按钮） */
+export function onImport(e) {
+    const anchor = e?.currentTarget;
+    if (!anchor) { importFromFiles(); return; }
+    popupMenu(anchor, [
+        { label: '从文件导入', icon: 'upload', onClick: importFromFiles },
+        { label: '从 Discord 链接导入', icon: 'link', onClick: importFromUrl },
+    ]);
+}
+
+async function importFromFiles() {
     const files = await pickFiles({ accept: '.png,.json,.jsonl', multiple: true });
     if (files.length) await importFiles(files);
+}
+
+/** 粘贴 Discord 里卡片文件的链接，服务器下回来后和选本地文件一样导入成一张新卡 */
+async function importFromUrl() {
+    const f = await downloadCardFromLink('从链接导入角色卡');
+    if (f) await importFiles([f]);
+}
+
+/** 问链接、让服务器下载，返回 File；取消或失败返回 null（失败已经提示过） */
+async function downloadCardFromLink(title) {
+    const url = await promptDialog('粘贴卡片文件的链接：\n在 Discord 里长按（电脑上右键）那个卡片文件，选“复制链接”。', '', { title, placeholder: 'https://cdn.discordapp.com/attachments/…' });
+    if (!url?.trim()) return null;
+    const tip = toast('正在下载…', 'info', 60000);
+    try {
+        return await api.fetchCardUrl(url.trim());
+    } catch (e) {
+        toast(`没下下来：${e.message}`, 'error', 8000);
+        return null;
+    } finally {
+        tip?.remove?.();
+    }
 }
 
 export async function onCreate() {
