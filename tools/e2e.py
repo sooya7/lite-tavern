@@ -1456,6 +1456,105 @@ def main():
             mctx.close()
         run('手机布局（390px）', mobile)
 
+        def mobile_char_world():
+            # 手机上的 设置 › 角色 › 角色卡 / 世界书：头像一栏不挤名字、名单只列勾上的、条目点得开、页面不左右晃
+            mctx = browser.new_context(viewport={'width': 390, 'height': 844}, is_mobile=True, has_touch=True, locale='zh-CN')
+            offline_cdn(mctx)
+            mp = mctx.new_page()
+            mp.on('pageerror', lambda e: errors.append(f'mobile2 pageerror: {e}'))
+            books = [f'折叠测试{i}' for i in range(1, 9)]
+
+            def enter():
+                mp.goto(BASE + '/')
+                mp.wait_for_selector('#chat .recent-item, #chat .mes', timeout=15000)
+                if mp.locator('#chat .recent-item').count():
+                    mp.locator('#chat .recent-item').first.click()
+                mp.wait_for_selector('#chat .mes')
+                mp.wait_for_timeout(1200)
+            enter()
+            mp.evaluate("""async (names) => { for (const n of names) { const r = await fetch('/api/worlds/' + encodeURIComponent(n), { method: 'PUT',
+                headers: { 'Content-Type': 'application/json', 'X-LT-Client': '2' }, body: JSON.stringify({ entries: {} }) }); if (!r.ok) throw new Error(n + ' ' + r.status); } }""", books)
+            enter()
+            try:
+                mp.wait_for_selector('#e2e-float', state='attached', timeout=10000)
+                vis = lambda: mp.evaluate("getComputedStyle(document.getElementById('e2e-float')).visibility")
+                assert vis() == 'visible', '没开设置时脚本的悬浮窗应该看得到'
+                right_tab('角色卡', mp)
+                assert vis() == 'hidden', '设置面板盖住屏幕时，脚本的悬浮窗还压在上面'
+                box = mp.evaluate("""() => { const r = (el) => el.getBoundingClientRect(); const col = document.querySelector('#right .avatar-col');
+                    const img = r(col.querySelector('.avatar')), btn = r(col.querySelector('.btn')), name = r(document.querySelector('#right .avatar-col + .grow .input'));
+                    const body = document.querySelector('#right .panel-body');
+                    return { imgBottom: img.bottom, btnTop: btn.top, btnLeft: btn.left, imgLeft: img.left, nameW: name.width,
+                        ox: getComputedStyle(body).overflowX, fs: [...new Set([...body.querySelectorAll('.input, .select, .textarea')].map(e => getComputedStyle(e).fontSize))] }; }""")
+                assert box['btnTop'] >= box['imgBottom'] and abs(box['btnLeft'] - box['imgLeft']) < 2, f'“换头像”没有排在头像下面：{box}'
+                assert box['nameW'] >= 180, f'名字输入框被挤窄了：{box}'
+                assert box['ox'] == 'hidden', f'设置面板还能横向滚：{box}'
+                assert box['fs'] == ['16px'], f'手机上输入框字号小于 16px，iOS 点进去会放大页面：{box}'
+                # 角色的“额外世界书”：一本都没勾 → 只有一句话和一个收起来的折叠块
+                extra = mp.locator('#right .pick-list').first
+                assert extra.locator(':scope > .fold').get_attribute('open') is None
+                assert extra.locator(':scope > .check-list .check').count() == 0
+                mp.screenshot(path=os.path.join(SHOTS, '16-mobile-char.png'))
+
+                right_tab('世界书', mp)
+                pl = mp.locator('#right .card .pick-list')
+                fold = pl.locator(':scope > .fold')
+                assert fold.get_attribute('open') is None, '没勾的世界书应该默认收着'
+                on_before = pl.locator(':scope > .check-list .check').all_inner_texts()
+                assert not any(b in t for t in on_before for b in books), on_before
+                assert not fold.locator('.check', has_text='折叠测试3').is_visible()
+                fold.locator(':scope > summary').click()
+                fold.locator('.check', has_text='折叠测试3').click()
+                mp.wait_for_timeout(200)
+                assert pl.locator(':scope > .check-list .check', has_text='折叠测试3').count() == 1, '勾上的没有挪到上面'
+                assert fold.locator('.check', has_text='折叠测试3').count() == 0
+                assert fold.get_attribute('open') is not None, '勾了一本，折叠块不该自己收起来'
+                mp.wait_for_function("() => fetch('/api/settings').then(r => r.json()).then(s => (s.worldInfo.globalSelect ?? []).includes('折叠测试3'))", timeout=8000)
+                mp.screenshot(path=os.path.join(SHOTS, '17-mobile-world.png'))
+                pl.locator(':scope > .check-list .check', has_text='折叠测试3').click()
+                mp.wait_for_timeout(200)
+                assert fold.locator('.check', has_text='折叠测试3').count() == 1, '取消勾选的没有回到折叠块里'
+                mp.wait_for_function("() => fetch('/api/settings').then(r => r.json()).then(s => !(s.worldInfo.globalSelect ?? []).includes('折叠测试3'))", timeout=8000)
+                fold.locator(':scope > summary').click()
+
+                # 编辑世界书：默认是当前角色绑定的那本；选择框够宽；五个按钮都在屏幕里
+                linked = mp.evaluate("window.SillyTavern.getContext().characters?.[window.SillyTavern.getContext().characterId]?.data?.extensions?.world ?? ''")
+                bar = mp.evaluate("""() => { const b = document.querySelector('#right .pick-bar'); const s = b.querySelector('select');
+                    return { value: s.value, selW: s.getBoundingClientRect().width, rights: [...b.querySelectorAll('.icon-btn')].map(x => Math.round(x.getBoundingClientRect().right)) }; }""")
+                if linked:
+                    assert bar['value'] == linked, f'编辑的不是当前角色绑定的世界书：{bar} / {linked}'
+                assert bar['selW'] >= 200, f'世界书选择框被挤窄了：{bar}'
+                assert len(bar['rights']) == 5 and max(bar['rights']) <= 390, f'世界书的按钮伸出屏幕：{bar}'
+                # 条目：整行点得开，右边有箭头
+                mp.wait_for_selector('#right .entry-row')
+                row = mp.locator('#right .entry-row').first
+                assert row.locator('.entry-open').is_visible(), '条目行上没有“打开”的箭头'
+                tw = mp.evaluate("document.querySelector('#right .entry-row .li-name').getBoundingClientRect().width")
+                assert tw >= 150, f'条目标题只剩 {tw}px'
+                row.locator('.entry-meta').tap()
+                mp.wait_for_selector('.modal >> text=编辑条目', timeout=5000)
+                mp.screenshot(path=os.path.join(SHOTS, '18-mobile-entry.png'))
+                mp.locator('.modal-foot button', has_text='取消').click()
+                mp.wait_for_timeout(300)
+                row.locator('.entry-open').tap()
+                mp.wait_for_selector('.modal >> text=编辑条目', timeout=5000)
+                mp.locator('.modal-foot button', has_text='取消').click()
+                mp.wait_for_timeout(300)
+                # 开关还是开关：点它不弹详情
+                was = row.get_attribute('class')
+                row.locator('.switch').tap()
+                mp.wait_for_timeout(300)
+                assert mp.locator('.modal').count() == 0, '点开关把详情弹出来了'
+                assert mp.locator('#right .entry-row').first.get_attribute('class') != was
+                mp.locator('#right .entry-row').first.locator('.switch').tap()
+                mp.wait_for_timeout(1200)
+                sw = mp.evaluate("(() => { const b = document.querySelector('#right .panel-body'); return [b.scrollWidth, b.clientWidth]; })()")
+                assert sw[0] <= sw[1], f'世界书页里有东西比面板宽：{sw}'
+            finally:
+                mp.evaluate("""async (names) => { for (const n of names) await fetch('/api/worlds/' + encodeURIComponent(n), { method: 'DELETE', headers: { 'X-LT-Client': '2' } }); }""", books)
+                mctx.close()
+        run('手机上的角色卡 / 世界书页（头像栏、只列勾上的、条目点得开、不左右晃）', mobile_char_world)
+
         def opening_bridge():
             # 开场选择这类卡：界面（沙箱里）先问酒馆“现在是哪个聊天”、读首楼的全部开场，再在父页面上发一个自定义事件，
             # 卡自带的脚本接住后切开场、把身份填进输入框，结果通过 detail.result 传回界面

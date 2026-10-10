@@ -69,7 +69,7 @@ export function render(body) {
     const avatarImg = cur.avatar ? h('img', { class: 'avatar lg', src: api.personaAvatarUrl(cur.avatar) + `?v=${Date.now()}`, alt: '' }) : h('div', { class: 'avatar lg avatar-letter', style: { fontSize: '36px' } }, (cur.name || '?').slice(0, 1));
     body.append(
         h('div', { class: 'row', style: { alignItems: 'flex-start', gap: '12px', marginBottom: '6px' } },
-            h('div', {}, avatarImg, h('button', { class: 'btn small', style: { marginTop: '6px', width: '96px' }, onclick: () => changeAvatar(cur) }, '换头像')),
+            h('div', { class: 'avatar-col' }, avatarImg, h('button', { class: 'btn small', onclick: () => changeAvatar(cur) }, '换头像')),
             h('div', { class: 'grow' }, field('名字', textInput(cur, 'name', { onChange: () => { save(); refresh('topbar'); } })))),
         field(h('span', {}, '设定描述 ', tokenEl), (() => {
             const ta = textArea(cur, 'description', { rows: 8, onChange: save });

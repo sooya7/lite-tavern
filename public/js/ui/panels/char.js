@@ -5,7 +5,7 @@ import { api } from '../../api.js';
 import { loadRelevantWorlds, refresh, reloadCharacters } from '../../controller.js';
 import { cardTavernHelperScripts } from '../../core/card.js';
 import { estimateTokens } from '../../core/tokens.js';
-import { field, textInput, textArea, numberInput, select, section, collapsible } from '../form.js';
+import { field, textInput, textArea, numberInput, select, section, collapsible, pickList } from '../form.js';
 import { renderPanels } from './index.js';
 
 export function render(body) {
@@ -23,8 +23,8 @@ export function render(body) {
 
     const avatar = h('img', { class: 'avatar lg', src: api.avatarUrl(state.char.file, state.char.v), alt: '' });
     body.append(h('div', { class: 'row', style: { alignItems: 'flex-start', marginBottom: '10px', gap: '12px' } },
-        h('div', { style: { position: 'relative' } }, avatar,
-            h('button', { class: 'btn small', style: { marginTop: '6px', width: '96px' }, onclick: () => changeAvatar(avatar) }, '换头像')),
+        h('div', { class: 'avatar-col' }, avatar,
+            h('button', { class: 'btn small', onclick: () => changeAvatar(avatar) }, '换头像')),
         h('div', { class: 'grow' },
             field('名字', textInput(d, 'name', { onChange: () => { save(); refresh('topbar'); } })),
             h('div', { style: { marginTop: '6px' } }, tokenEl),
@@ -130,18 +130,13 @@ function worldEditor(d, ext, save) {
         await loadRelevantWorlds();
         refresh('panels');
     });
-    const extra = s.worldInfo.charLore?.[state.char.id] ?? [];
-    const extraBox = h('div', { class: 'check-list' }, names.filter(n => n !== linked).map(n => {
-        const cb = h('input', { type: 'checkbox', checked: extra.includes(n) });
-        cb.addEventListener('change', async () => {
-            const cur = new Set(s.worldInfo.charLore?.[state.char.id] ?? []);
-            if (cb.checked) cur.add(n); else cur.delete(n);
-            s.worldInfo.charLore = { ...(s.worldInfo.charLore ?? {}), [state.char.id]: [...cur] };
-            saveSettings();
-            await loadRelevantWorlds();
-        });
-        return h('label', { class: 'check' }, cb, n);
-    }));
+    const extra = new Set(s.worldInfo.charLore?.[state.char.id] ?? []);
+    const extraBox = pickList(names.filter(n => n !== linked), n => extra.has(n), async (n, on) => {
+        if (on) extra.add(n); else extra.delete(n);
+        s.worldInfo.charLore = { ...(s.worldInfo.charLore ?? {}), [state.char.id]: [...extra] };
+        saveSettings();
+        await loadRelevantWorlds();
+    }, { noneText: '没有额外的', moreTitle: '其他世界书', unit: '本' });
     const embedded = d.character_book?.entries?.length ?? 0;
     return h('div', {},
         field('绑定的世界书', sel, embedded ? `卡里内嵌了 ${embedded} 条世界书条目；导入时已另存为世界书并绑定。` : '绑定后，这个角色的每个聊天都会用它'),

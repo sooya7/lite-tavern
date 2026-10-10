@@ -93,6 +93,40 @@ export function collapsible(title, children, { open = false, sub } = {}) {
         h('div', { class: 'fold-body' }, children));
 }
 
+/**
+ * 名字很多的勾选清单：勾上的直接列出来，没勾的收进折叠块，点开才能选。
+ * 勾 / 取消后当场挪位置，折叠块开着就保持开着。名字不多（不超过 foldOver 个）时照旧全部列出。
+ * @param {string[]} names
+ * @param {(name: string) => boolean} isOn
+ * @param {(name: string, on: boolean) => any} onToggle 要同步改好 isOn 读的那份数据（存盘之类的可以异步）
+ */
+export function pickList(names, isOn, onToggle, { noneText = '一个都没勾', moreTitle = '其他', unit = '个', foldOver = 6 } = {}) {
+    const wrap = h('div', { class: 'pick-list' });
+    let open = false;
+    const draw = (focusName) => {
+        const boxes = new Map();
+        const row = (n) => {
+            const cb = h('input', { type: 'checkbox', checked: isOn(n) });
+            cb.addEventListener('change', () => { const r = onToggle(n, cb.checked); draw(n); return r; });
+            boxes.set(n, cb);
+            return h('label', { class: 'check' }, cb, h('span', {}, n));
+        };
+        const more = wrap.querySelector(':scope > .fold');
+        if (more) open = more.open;
+        wrap.replaceChildren();
+        if (names.length <= foldOver) {
+            wrap.append(h('div', { class: 'check-list' }, names.map(row)));
+        } else {
+            const on = names.filter(isOn), off = names.filter(n => !isOn(n));
+            wrap.append(on.length ? h('div', { class: 'check-list' }, on.map(row)) : h('div', { class: 'muted small pick-none' }, noneText));
+            if (off.length) wrap.append(collapsible(moreTitle, h('div', { class: 'check-list' }, off.map(row)), { open, sub: `${off.length} ${unit}` }));
+        }
+        if (focusName) boxes.get(focusName)?.focus({ preventScroll: true });
+    };
+    draw();
+    return wrap;
+}
+
 /** JSON 编辑框：失焦或点保存时解析，失败标红 */
 export function jsonEditor(value, onSave, { rows = 10, label = '保存' } = {}) {
     const ta = h('textarea', { class: 'textarea code', rows, spellcheck: 'false' });

@@ -23,13 +23,15 @@ export function render(body) {
     // ---------- 选择与文件操作 ----------
     const picker = h('select', { class: 'select grow' }, state.presetList.map(x => h('option', { value: x.name, selected: x.name === state.preset.name }, x.name)));
     picker.addEventListener('change', () => setPreset(picker.value));
-    body.append(h('div', { class: 'row', style: { marginBottom: '10px' } },
+    // 和世界书那一排一样：窄屏上选择框自己占一行，按钮排到下一行（样式 .pick-bar）
+    body.append(h('div', { class: 'pick-bar', style: { marginBottom: '10px' } },
         picker,
-        iconBtn('upload', '导入预设 JSON', onImport),
-        iconBtn('download', '导出当前预设', () => downloadText(JSON.stringify(p, null, 4), `${state.preset.name}.json`)),
-        iconBtn('copy', '另存为', onSaveAs),
-        iconBtn('edit', '重命名', onRename),
-        iconBtn('trash', '删除预设', onDelete),
+        h('div', { class: 'pick-bar-acts' },
+            iconBtn('upload', '导入预设 JSON', onImport),
+            iconBtn('download', '导出当前预设', () => downloadText(JSON.stringify(p, null, 4), `${state.preset.name}.json`)),
+            iconBtn('copy', '另存为', onSaveAs),
+            iconBtn('edit', '重命名', onRename),
+            iconBtn('trash', '删除预设', onDelete)),
     ));
 
     // ---------- 采样参数 ----------

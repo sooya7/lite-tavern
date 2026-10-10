@@ -6,11 +6,12 @@ import { loadRelevantWorlds, refresh } from '../../controller.js';
 import { newWorldInfoEntry, WI_POSITION, WI_LOGIC, DEFAULT_WI_SETTINGS, normalizeWorld } from '../../core/worldinfo.js';
 import { estimateTokens } from '../../core/tokens.js';
 import { clone } from '../../core/util.js';
-import { field, textInput, textArea, numberInput, checkbox, select, rangeRow, section, collapsible, toggle } from '../form.js';
+import { field, textInput, textArea, numberInput, checkbox, select, rangeRow, section, collapsible, toggle, pickList } from '../form.js';
 import { renderPanels } from './index.js';
 import { importWorldJson } from '../importers.js';
 
 let editing = '';
+let pickedFor = null; // 上一次是替哪个角色挑的“正在编辑哪一本”
 let query = '';
 
 const POSITIONS = [
@@ -46,16 +47,12 @@ export function render(body) {
     for (const n of wi.charLore?.[state.char?.id] ?? []) activeInfo.push(`角色额外：${n}`);
     if (chatWorld) activeInfo.push(`聊天绑定：${chatWorld}`);
     body.append(section('全局世界书（所有聊天都生效）',
-        names.length ? h('div', { class: 'check-list' }, names.map(n => {
-            const cb = h('input', { type: 'checkbox', checked: global.has(n) });
-            cb.addEventListener('change', async () => {
-                if (cb.checked) global.add(n); else global.delete(n);
-                wi.globalSelect = [...global];
-                saveSettings();
-                await loadRelevantWorlds();
-            });
-            return h('label', { class: 'check' }, cb, n);
-        })) : h('div', { class: 'muted small' }, '还没有世界书'),
+        names.length ? pickList(names, n => global.has(n), async (n, on) => {
+            if (on) global.add(n); else global.delete(n);
+            wi.globalSelect = [...global];
+            saveSettings();
+            await loadRelevantWorlds();
+        }, { noneText: '现在没有启用全局世界书', moreTitle: '其他世界书', unit: '本' }) : h('div', { class: 'muted small' }, '还没有世界书'),
         activeInfo.length ? h('div', { class: 'hint' }, `当前聊天另外生效：${activeInfo.join('；')}`) : null,
     ));
 
@@ -83,17 +80,24 @@ export function render(body) {
     ]));
 
     // ---------- 编辑 ----------
-    if (!editing || !names.includes(editing)) editing = (linked && names.includes(linked)) ? linked : (names[0] ?? '');
+    // 默认打开当前角色绑定的那本。换了角色（包括刚启动时还没进聊天、面板先画了一遍）要重新挑，
+    // 不然会一直停在名单里的第一本上；同一个角色下用户自己选了别的就听他的
+    const charKey = state.char?.id ?? '';
+    const hasLinked = !!linked && names.includes(linked);
+    if (!editing || !names.includes(editing) || (pickedFor !== charKey && hasLinked)) editing = hasLinked ? linked : (editing && names.includes(editing) ? editing : (names[0] ?? ''));
+    pickedFor = charKey;
     const picker = h('select', { class: 'select grow' }, names.map(n => h('option', { value: n, selected: n === editing }, n)));
     picker.addEventListener('change', () => { editing = picker.value; renderPanels(); });
     body.append(h('div', { class: 'section-head' }, '编辑世界书'));
-    body.append(h('div', { class: 'row', style: { marginBottom: '8px' } },
+    // 窄屏上选择框自己占一行，五个按钮排到下一行，不再把选择框挤成一条缝、把“删除”挤出屏幕
+    body.append(h('div', { class: 'pick-bar' },
         names.length ? picker : h('div', { class: 'grow muted small' }, '还没有世界书'),
-        iconBtn('plus', '新建世界书', onCreate),
-        iconBtn('upload', '导入世界书 JSON', onImport),
-        editing ? iconBtn('download', '导出', onExport) : null,
-        editing ? iconBtn('edit', '重命名', onRename) : null,
-        editing ? iconBtn('trash', '删除', onDelete) : null,
+        h('div', { class: 'pick-bar-acts' },
+            iconBtn('plus', '新建世界书', onCreate),
+            iconBtn('upload', '导入世界书 JSON', onImport),
+            editing ? iconBtn('download', '导出', onExport) : null,
+            editing ? iconBtn('edit', '重命名', onRename) : null,
+            editing ? iconBtn('trash', '删除', onDelete) : null),
     ));
     if (!editing) return;
     const holder = h('div', {}, h('div', { class: 'muted small' }, '加载中…'));
@@ -107,7 +111,7 @@ export function render(body) {
 
 function entryList(name, w) {
     const wrap = h('div');
-    const search = h('input', { class: 'input', type: 'search', placeholder: '搜索标题 / 关键词 / 内容…', value: query });
+    const search = h('input', { class: 'input', type: 'search', placeholder: '搜索条目…', title: '按标题、关键词、内容搜', value: query });
     const list = h('div', { class: 'entry-list' });
     const fill = () => {
         clear(list);
@@ -138,16 +142,19 @@ function strategyTag(e) {
 
 function entryRow(name, w, e, refill) {
     const title = e.comment || e.key.join(', ') || `条目 ${e.uid}`;
-    return h('div', { class: `list-item entry-row ${e.disable ? 'disabled' : ''}` },
+    const open = () => editEntry(name, w, e, refill);
+    // 整行都能点开（开关除外），右边的箭头是给人看的：这一行点了会打开详情
+    return h('div', { class: `list-item entry-row ${e.disable ? 'disabled' : ''}`, onclick: open },
         toggle(!e.disable, (v) => { e.disable = !v; saveWorld(name); refill(); }, '启用/停用'),
-        h('div', { class: 'grow', style: { minWidth: 0, cursor: 'pointer' }, onclick: () => editEntry(name, w, e, refill) },
+        h('div', { class: 'entry-main' },
             h('div', { class: 'li-name' }, title),
-            h('div', { class: 'li-sub', style: { whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } },
-                e.constant ? '' : (e.key.length ? `🔑 ${e.key.join(', ')}` : '（没有关键词）'),
-                ` · ${estimateTokens(e.content)} tokens`)),
-        strategyTag(e),
-        h('span', { class: 'tag', title: '插入位置' }, Number(e.position) === 4 ? `@${e.depth}` : (POS_SHORT[e.position] ?? '?')),
-        h('span', { class: 'li-sub', title: '顺序', style: { minWidth: '26px', textAlign: 'right' } }, String(e.order ?? 100)),
+            h('div', { class: 'entry-meta' },
+                strategyTag(e),
+                h('span', { class: 'tag', title: '插入位置' }, Number(e.position) === 4 ? `@${e.depth}` : (POS_SHORT[e.position] ?? '?')),
+                h('span', { class: 'li-sub', title: '顺序' }, `顺序 ${e.order ?? 100}`)),
+            h('div', { class: 'li-sub entry-keys' }, `${estimateTokens(e.content)} tokens`,
+                e.constant ? '' : (e.key.length ? ` · 🔑 ${e.key.join(', ')}` : ' · 没有关键词'))),
+        h('button', { class: 'icon-btn entry-open', title: '打开这一条', 'aria-label': `打开条目：${title}`, onclick: (ev) => { ev.stopPropagation(); open(); } }, icon('right')),
     );
 }
 
