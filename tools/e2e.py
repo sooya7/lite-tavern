@@ -588,6 +588,33 @@ def main():
             right_tab('连接')
         run('代生成：额外模型解析的变量也由服务器算好', server_gen_extra_vars)
 
+        def server_gen_regen_no_reload_loop():
+            # 服务器替页面写的那一楼后来被重新生成了：它的任务还挂在服务器上，但聊天里已经找不到它写的楼层。
+            # 页面回到前台时不能为了它一遍遍重新载入聊天（以前会每秒载入一次、存一次，还会弹“在别处被改过了”）
+            cid, cname = current_chat()
+            q = urllib.parse.quote
+            with urllib.request.urlopen(f'{BASE}/api/gen/active?char={q(cid, safe="")}&chat={q(cname, safe="")}') as r:
+                done = [j for j in json.loads(r.read().decode('utf-8')) if j['status'] == 'persisted']
+            assert done, '前面的用例应该留下了服务器写过的任务'
+            n = mes_count()
+            page.locator('#chat .mes.last .mes_tools [title="重新生成"]').click()
+            wait_gen(60000)
+            assert mes_count() == n, f'重新生成后楼层数 {mes_count()}（应为 {n}）'
+            msgs = chat_lines()
+            assert 'lt_server_persisted' not in (msgs[-1].get('extra') or {}), '重新生成的这条是页面在线时写的'
+            seen = []
+            watch = lambda r: seen.append(r.method + ' ' + r.url) if '/api/gen/active' in r.url or '/api/chats/' in r.url else None
+            page.on('request', watch)
+            page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
+            page.wait_for_timeout(4000)
+            page.remove_listener('request', watch)
+            loads = [x for x in seen if x.startswith('GET') and '/api/chats/' in x]
+            asks = [x for x in seen if '/api/gen/active' in x]
+            assert len(asks) <= 2 and not loads, f'页面在反复重新载入聊天：问了 {len(asks)} 次任务、载入了 {len(loads)} 次聊天'
+            assert not page.locator('.modal-backdrop', has_text='在别处被改过了').count(), '弹了“在别处被改过了”'
+            assert mes_count() == n and chat_lines_direct()[-1]['mes'] == msgs[-1]['mes'], '聊天被动过了'
+        run('代生成：服务器写的那条被重新生成后，页面不会反复重新载入聊天', server_gen_regen_no_reload_loop)
+
         def server_gen_reload_resume():
             # 刷新页面：生成中的任务接着显示，收尾仍由页面做
             page.fill('#send_textarea', 'SLOW 刷新后接着看')

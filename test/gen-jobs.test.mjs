@@ -11,7 +11,7 @@ import { GenJobs } from '../server/gen-jobs.mjs';
 import { buildServerSession } from '../server/gen-persist.mjs';
 import { parseChatJsonl, serializeChat, createGreetingMessage, createUserMessage, newChatHeader, messageText } from '../public/js/core/chat.js';
 import { cardGreetings } from '../public/js/core/card.js';
-import { locateReply, placeLocated, placeReply, finalizeReply, separateReasoning, wantsSeparateVars, applyReplyVars, messageFingerprint } from '../public/js/core/reply.js';
+import { locateReply, placeLocated, placeReply, finalizeReply, separateReasoning, wantsSeparateVars, applyReplyVars, messageFingerprint, persistedToLoad } from '../public/js/core/reply.js';
 import { updateVarsSeparately, mvuConnectionOf } from '../public/js/core/mvu-request.js';
 import { readLlmResponse } from '../public/js/core/llm.js';
 
@@ -402,4 +402,41 @@ test('代生成：写入位置的认法（追加 / 重新生成 / swipe / 续写
     placeReply(sw, { type: 'swipe', index: 1, provider: 'openai', model: 'm', started: new Date(), jobId: 'g_2', charName: 'C' });
     assert.equal(locateReply(sw, { type: 'swipe', index: 1, swipeId: 1, anchor: fpU }, 'g_2').kind, 'swipe-placeholder');
     assert.equal(messageText(sw[1]), '');
+});
+
+test('服务器写过的任务：手里这份没看到才重新载入，那一楼后来被换掉 / 删掉的不再为它载入', () => {
+    const job = (id, at) => ({ id, status: 'persisted', persisted: { index: 2, version: `${at}-5000` } });
+    const u = { name: '我', is_user: true, mes: '问' };
+    const byServer = (id) => ({ name: '她', is_user: false, mes: '答', extra: { lt_server_persisted: { job: id, pending: true } } });
+    const ids = (list) => list.map(j => j.id);
+
+    // 页面是服务器写之前读的：要载入
+    assert.deepEqual(ids(persistedToLoad([u], '1000-4000', [job('g_a', 2000)])), ['g_a']);
+    // 已经载入过，楼层就在手里：不用
+    assert.deepEqual(ids(persistedToLoad([u, byServer('g_a')], '2000-5000', [job('g_a', 2000)])), []);
+    // 作为某个 swipe 留着的也算在手里
+    const swiped = { name: '她', is_user: false, mes: '新的', extra: {}, swipes: ['旧', '新的'], swipe_info: [{ extra: { lt_server_persisted: { job: 'g_a' } } }, { extra: {} }] };
+    assert.deepEqual(ids(persistedToLoad([u, swiped], '2000-5000', [job('g_a', 2000)])), []);
+
+    // 那一楼被重新生成换掉了（手里这份是之后存的，版本比服务器写的新）：不再载入。
+    // 以前这里会一直判成“没看到”，页面每秒重新载入一次聊天
+    const regenerated = { name: '她', is_user: false, mes: '重新生成的', extra: {} };
+    assert.deepEqual(ids(persistedToLoad([u, regenerated], '3000-5100', [job('g_a', 2000)])), []);
+    // 那一楼被删掉、聊天被“用这边的覆盖”盖回去，也一样
+    assert.deepEqual(ids(persistedToLoad([u], '3000-4000', [job('g_a', 2000)])), []);
+    // 载入之后版本正好等于服务器写完的那一版，但楼层不在（别的窗口紧接着换掉了它）：也不再载入
+    assert.deepEqual(ids(persistedToLoad([u, regenerated], '2000-5000', [job('g_a', 2000)])), []);
+
+    // 兜底：版本号比不出先后时（旧服务端不给版本），每个任务只载入一次
+    const noVer = { id: 'g_b', status: 'persisted', persisted: { index: 2 } };
+    const seen = new Set();
+    assert.deepEqual(ids(persistedToLoad([u], '', [noVer], seen)), ['g_b']);
+    seen.add('g_b');
+    assert.deepEqual(ids(persistedToLoad([u], '', [noVer], seen)), []);
+    // 载入过一次之后，即使版本看起来还是旧的也不再载入（绝不能循环）
+    assert.deepEqual(ids(persistedToLoad([u], '1000-4000', [job('g_a', 2000)], new Set(['g_a']))), []);
+
+    // 没写完的任务不归这里管；多个任务各看各的
+    assert.deepEqual(ids(persistedToLoad([u], '1000-4000', [{ id: 'g_run', status: 'running' }, { id: 'g_wait', status: 'awaiting_ack' }])), []);
+    assert.deepEqual(ids(persistedToLoad([u, byServer('g_a')], '2000-5000', [job('g_a', 2000), job('g_old', 1500), job('g_new', 2500)])), ['g_new']);
 });

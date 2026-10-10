@@ -9,7 +9,7 @@ import { sleep, uuid, clone } from './core/util.js';
 import { estimateTokens } from './core/tokens.js';
 import { toast } from './ui/dom.js';
 import { GenError, readLlmResponse, generateWithRetry } from './core/llm.js';
-import { separateReasoning, placeReply, placeLocated, locateReply, finalizeReply, wantsSeparateVars, applyReplyVars, messageFingerprint } from './core/reply.js';
+import { separateReasoning, placeReply, placeLocated, locateReply, finalizeReply, wantsSeparateVars, applyReplyVars, messageFingerprint, persistedToLoad } from './core/reply.js';
 import * as mvuReq from './core/mvu-request.js';
 import { latestMvuVars, MVU_EVENTS } from './core/mvu.js';
 import { broadcastEvent } from './ui/frontend.js';
@@ -445,11 +445,9 @@ async function adoptServerReply(ctx) {
 
 // ---------- 刷新 / 重开聊天后接回服务器上的任务 ----------
 
-const markOf = (x) => x?.extra?.lt_server_persisted;
-/** 这条楼层（任一 swipe）是不是这个任务写的 */
-const writtenBy = (m, jobId) => markOf(m)?.job === jobId || (m?.swipe_info ?? []).some(s => markOf(s)?.job === jobId);
-
 let resuming = false;
+/** 已经为它重新载入过聊天的任务（服务器替页面写的）。每个任务只载入一次，见 core/reply.js 的 persistedToLoad */
+const reloadedFor = new Set();
 /**
  * 打开聊天 / 回到前台 / 网络恢复时调用：这个聊天在服务器上还有没完成的任务，就接着显示它的流；
  * 服务器刚替页面写好的，本地还是旧的就重新载入。
@@ -461,8 +459,9 @@ export async function resumeActiveJobs() {
         const chatRef = state.chat;
         const jobs = await activeJobs(state.char.id, chatRef.name);
         if (state.chat !== chatRef || state.generating) return;
-        const done = jobs.filter(j => j.status === 'persisted');
-        if (done.some(j => !chatRef.messages.some(m => writtenBy(m, j.id)))) {
+        const missed = persistedToLoad(chatRef.messages, chatRef.version, jobs, reloadedFor);
+        if (missed.length) {
+            for (const j of missed) reloadedFor.add(j.id);
             discardPendingChatSave();
             await openChat(chatRef.name, { stay: true });
             return;

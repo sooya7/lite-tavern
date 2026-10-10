@@ -160,6 +160,34 @@ export function locateReply(messages, target, jobId) {
     return { kind: 'orphan', index: messages.length };
 }
 
+const serverMarkOf = (x) => x?.extra?.lt_server_persisted;
+/** 这条楼层（任一 swipe）是不是这个任务由服务器写的 */
+export const writtenByJob = (m, jobId) => serverMarkOf(m)?.job === jobId || (m?.swipe_info ?? []).some(s => serverMarkOf(s)?.job === jobId);
+
+// 版本号是 “修改时间毫秒-字节数”（server/store.mjs 的 fileVersion）：取前半段比先后
+const versionTime = (v) => Number(String(v ?? '').split('-')[0]) || 0;
+
+/**
+ * 服务器替页面写过的任务里，哪些是手里这份聊天还没看到、需要重新载入的。
+ * 找不到任务写的那一楼不等于“没看到”：那一楼可能后来被重新生成、删掉、或者被“用这边的覆盖”盖掉了，
+ * 这时再载入多少次也找不到。所以两条都要管：
+ *   - 手里这份的版本不比服务器写完时的旧（之后读的 / 之后存成功过）→ 已经看到过，不用载入；
+ *   - 已经为它载入过一次的（seen）→ 不再载入。少了这条，页面会每秒重新载入一次聊天，停不下来。
+ * @param {object[]} messages 手里的楼层
+ * @param {string} version 手里这份聊天的版本号
+ * @param {object[]} jobs /api/gen/active 返回的任务
+ * @param {Set<string>} [seen] 已经为它载入过的任务号
+ */
+export function persistedToLoad(messages, version, jobs, seen = new Set()) {
+    const mine = versionTime(version);
+    return (jobs ?? []).filter((j) => {
+        if (j?.status !== 'persisted' || seen.has(j.id)) return false;
+        if ((messages ?? []).some(m => writtenByJob(m, j.id))) return false;
+        const theirs = versionTime(j.persisted?.version);
+        return !(mine && theirs && mine >= theirs);
+    });
+}
+
 /**
  * 按 locateReply 的结果把占位放好（和页面上生成开始时一样），返回写入的楼层号和实际的生成类型。
  * @returns {{index: number, type: string, baseText: string}}
