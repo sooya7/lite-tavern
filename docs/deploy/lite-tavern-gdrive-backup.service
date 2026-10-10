@@ -1,0 +1,14 @@
+[Unit]
+Description=轻酒馆 + Luker 用户数据备份到 Google Drive
+After=network-online.target sooya-github-proxy.service
+Wants=network-online.target sooya-github-proxy.service
+
+[Service]
+Type=oneshot
+# 这台机器直连不了 Google，走本机的出口代理（和 sooya-gdrive-backup 同一个）
+Environment="HTTPS_PROXY=socks5://127.0.0.1:8082"
+ExecStart=/usr/local/sbin/lite-tavern-gdrive-backup.sh
+TimeoutStartSec=10800
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7

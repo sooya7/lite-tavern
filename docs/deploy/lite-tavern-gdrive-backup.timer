@@ -1,0 +1,11 @@
+[Unit]
+Description=每天凌晨把轻酒馆 + Luker 用户数据备份到 Google Drive
+
+[Timer]
+OnCalendar=*-*-* 04:40:00
+RandomizedDelaySec=10min
+Persistent=true
+Unit=lite-tavern-gdrive-backup.service
+
+[Install]
+WantedBy=timers.target
