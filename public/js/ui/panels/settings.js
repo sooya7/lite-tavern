@@ -45,6 +45,7 @@ export function render(body) {
         field('聊天区宽度（px）', rangeRow(ui, 'chatWidth', { min: 560, max: 1600, step: 20, onChange: look })),
         checkbox(ui, 'showReasoning', '显示思维链（可折叠）', { onChange: rerender }),
         checkbox(ui, 'showMesId', '显示楼层号', { onChange: rerender }),
+        field('聊天页只显示最近几楼', numberInput(ui, 'chatWindow', { min: 0, max: 9999, onChange: rerender, placeholder: '80' }), '只影响显示，不影响发给 AI 的内容；更早的点顶部按钮再加载。0 = 全部显示'),
         checkbox(ui, 'renderFrontend', '渲染代码块里的前端界面（酒馆助手式状态栏/面板）', { onChange: rerender }),
         checkbox(ui, 'enterToSend', '电脑上按 Enter 发送（Shift+Enter 换行）', { onChange: save }),
     ));

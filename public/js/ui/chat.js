@@ -12,7 +12,13 @@ import { renderHome } from './library.js';
 import { charAvatar, letterAvatar } from './avatars.js';
 import { chatTitle, renameChat, exportChat, deleteChat } from './sidebar.js';
 
-const RENDER_WINDOW = 80;
+// 聊天页一次显示多少楼（设置 › 通用 › 外观，和酒馆的“加载消息数”一个意思）；0 = 全部
+const renderWindow = () => {
+    const n = Number(state.settings.ui.chatWindow ?? 80);
+    return Number.isFinite(n) && n > 0 ? Math.floor(n) : Infinity;
+};
+// “加载更早的”每次补多少：窗口很小（比如只看最近 1～2 楼）时也别一次只补一两楼
+const loadStep = () => Math.max(20, Math.min(renderWindow(), 200));
 let renderFrom = 0;
 let stickToBottom = true;
 
@@ -64,8 +70,8 @@ export function renderChat() {
         return;
     }
     const msgs = state.chat.messages;
-    renderFrom = Math.max(0, msgs.length - RENDER_WINDOW);
-    if (renderFrom > 0) el.append(loadEarlierBtn(`加载更早的 ${Math.min(RENDER_WINDOW, renderFrom)} 条`));
+    renderFrom = Math.max(0, msgs.length - renderWindow());
+    if (renderFrom > 0) el.append(loadEarlierBtn(`加载更早的 ${Math.min(loadStep(), renderFrom)} 条（前面还有 ${renderFrom} 条）`));
     for (let i = renderFrom; i < msgs.length; i++) el.append(buildMessage(i));
     if (!msgs.length) el.append(h('div', { class: 'empty' }, '这张卡没有开场白，直接说点什么吧'));
     scrollToBottom(true);
@@ -73,7 +79,7 @@ export function renderChat() {
 
 function loadEarlierBtn(label) {
     return h('div', { class: 'load-earlier' },
-        h('button', { class: 'btn small', onclick: () => { renderFrom = Math.max(0, renderFrom - RENDER_WINDOW); rerenderFrom(); eventSource.emit(event_types.MORE_MESSAGES_LOADED); } }, label));
+        h('button', { class: 'btn small', onclick: () => { renderFrom = Math.max(0, renderFrom - loadStep()); rerenderFrom(); eventSource.emit(event_types.MORE_MESSAGES_LOADED); } }, label));
 }
 
 function rerenderFrom() {
@@ -82,7 +88,7 @@ function rerenderFrom() {
     const keep = scrollEl().scrollTop;
     clear(el);
     const msgs = state.chat.messages;
-    if (renderFrom > 0) el.append(loadEarlierBtn('加载更早的消息'));
+    if (renderFrom > 0) el.append(loadEarlierBtn(`加载更早的 ${Math.min(loadStep(), renderFrom)} 条（前面还有 ${renderFrom} 条）`));
     for (let i = renderFrom; i < msgs.length; i++) el.append(buildMessage(i));
     scrollEl().scrollTop = keep + (scrollEl().scrollHeight - prevH);
 }

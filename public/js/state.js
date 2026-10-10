@@ -92,7 +92,7 @@ export function mvuEmitter() {
 export const DEFAULT_SETTINGS = {
     version: 1,
     theme: 'auto', // auto 跟随系统
-    ui: { leftOpen: true, rightOpen: true, rightTab: 'connection', fontSize: 16, chatWidth: 780, enterToSend: true, showReasoning: true, showMesId: false, renderFrontend: true },
+    ui: { leftOpen: true, rightOpen: true, rightTab: 'connection', fontSize: 16, chatWidth: 780, enterToSend: true, showReasoning: true, showMesId: false, renderFrontend: true, chatWindow: 80 },
     connections: [],
     activeConnection: '',
     activePreset: '',
