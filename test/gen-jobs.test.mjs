@@ -46,14 +46,21 @@ function startUpstream() {
                 res.end(JSON.stringify({ error: { message: 'bad request (mock)' } }));
                 return;
             }
-            const reply = /PLAIN/.test(last) ? PLAIN : REPLY;
+            // HANGONCE：第一次收到后一直不回应（连响应头都不给），之后的请求正常
+            if (/HANGONCE/.test(last) && !hits.hung) {
+                hits.hung = true;
+                res.on('close', () => { hits.hangClosed = true; });
+                return;
+            }
+            const reply = /PLAIN|HANGONCE|LATEPAUSE/.test(last) ? PLAIN : REPLY;
             const delay = /SLOW/.test(last) ? 40 : 2;
             res.writeHead(200, { 'Content-Type': 'text/event-stream' });
             res.on('close', () => { if (!res.writableEnded) hits.aborted++; });
             for (let i = 0; i < reply.length; i += 4) {
                 if (res.destroyed) return;
                 res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: reply.slice(i, i + 4) } }] })}\n\n`);
-                await sleep(delay);
+                // LATEPAUSE：出了第一段之后停很久（比“没反应算失败”的时间长）再接着写
+                await sleep(/LATEPAUSE/.test(last) && i === 0 ? 700 : delay);
             }
             res.write('data: [DONE]\n\n');
             res.end();
@@ -308,6 +315,52 @@ test('代生成：页面带任务号保存 = 确认，服务器不会再写；�
     await waitFor(() => jobs.get(b2.id).status === 'persisted');
     assert.throws(() => jobs.beforeClientSave(b2.id), (e) => e.code === 'gen-persisted');
     assert.deepEqual(jobs.active(CHAR, name2).map(j => j.status), ['persisted']);
+});
+
+test('代生成：接口迟迟没有回应时到点重试；已经开始出字的不受这条限制', async () => {
+    const settings = await store.getSettings();
+    await store.saveSettings({ ...settings, retry: { enabled: true, maxRetries: 2, delayMs: 10, onEmpty: true, firstByteSec: 0.3, errorPatterns: '' } });
+    try {
+        // 第一次请求发出去后没有任何回应：0.3 秒后断开重试，第二次正常
+        const name = await newChat('HANGONCE');
+        const { messages } = await readChat(name);
+        const body = jobBody(name, messages, 'HANGONCE');
+        const main0 = hits.main;
+        const t0 = Date.now();
+        jobs.create(body);
+        const job = jobs.get(body.id);
+        await waitFor(() => ['awaiting_ack', 'persisted', 'failed'].includes(job.status));
+        assert.notEqual(job.status, 'failed', job.error);
+        assert.equal(job.text, PLAIN);
+        assert.equal(hits.main - main0, 2, '应该正好重试一次');
+        assert.ok(Date.now() - t0 < 3000, `不该等很久（用了 ${Date.now() - t0}ms）`);
+        await waitFor(() => hits.hangClosed, 2000);
+        assert.ok(job.events.some(e => e.type === 'reset'), '页面要收到“重试了”的事件');
+        await waitFor(() => job.status === 'persisted');
+
+        // 出了第一段之后停 0.7 秒（比限制长）：不算超时，不重试，内容完整
+        const name2 = await newChat('LATEPAUSE');
+        const m2 = (await readChat(name2)).messages;
+        const body2 = jobBody(name2, m2, 'LATEPAUSE');
+        const main1 = hits.main;
+        jobs.create(body2);
+        const job2 = jobs.get(body2.id);
+        await waitFor(() => ['awaiting_ack', 'persisted', 'failed'].includes(job2.status));
+        assert.equal(job2.status === 'failed' ? job2.error : '', '');
+        assert.equal(job2.text, PLAIN);
+        assert.equal(hits.main - main1, 1, '开始出字之后不该因为这条限制重试');
+        assert.ok(!job2.events.some(e => e.type === 'reset'));
+        await waitFor(() => job2.status === 'persisted');
+
+        // 非流式请求不套这条限制；设成 0 = 不限
+        const { firstByteTimeoutMs } = await import('../server/proxy.mjs');
+        assert.equal(firstByteTimeoutMs({ retry: { firstByteSec: 30 } }, { stream: true }), 30000);
+        assert.equal(firstByteTimeoutMs({ retry: { firstByteSec: 30 } }, { stream: false, body: {} }), 0);
+        assert.equal(firstByteTimeoutMs({ retry: { firstByteSec: 0 } }, { stream: true }), 0);
+        assert.equal(firstByteTimeoutMs({}, { body: { stream: true } }), 30000, '没设过就是默认 30 秒');
+    } finally {
+        await store.saveSettings(settings);
+    }
 });
 
 test('代生成：上游报错时任务失败、不写聊天；找不到任务时 404', async () => {

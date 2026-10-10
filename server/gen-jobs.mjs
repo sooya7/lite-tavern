@@ -144,8 +144,8 @@ export class GenJobs {
             try {
                 res = await openUpstream(this.store, job.conn, job.request, signal);
             } catch (e) {
-                // 连不上：和页面经代理请求时一样算 502，可以重试
-                if (e instanceof HttpError) throw new GenError(e.status === 502 ? e.message : `接口报错（${e.status}）：${e.message}`, { retryable: e.status >= 500, status: e.status });
+                // 连不上（502）或迟迟不开口（504）：和页面经代理请求时一样，可以重试
+                if (e instanceof HttpError) throw new GenError(e.status === 502 || e.status === 504 ? e.message : `接口报错（${e.status}）：${e.message}`, { retryable: e.status >= 500, status: e.status });
                 throw e;
             }
             return readLlmResponse(job.provider, job.request, res, onDelta);

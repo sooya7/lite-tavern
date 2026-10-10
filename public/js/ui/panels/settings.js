@@ -75,6 +75,8 @@ export function render(body) {
             field('最多重试次数', numberInput(r, 'maxRetries', { min: 0, max: 10, onChange: save })),
             field('间隔（毫秒，逐次递增）', numberInput(r, 'delayMs', { min: 0, step: 500, onChange: save })),
         ),
+        field('接口多久没反应算失败（秒，0 = 不限）', numberInput(r, 'firstByteSec', { min: 0, max: 600, step: 5, onChange: save }),
+            '只管“发出去之后一直没有任何回应”这一段，超时就按上面的设置重试。一旦开始出字就不再受它限制；思考很久才开口的模型如果总被判超时，把这个数调大'),
         checkbox(r, 'onEmpty', '回复为空时也重试', { onChange: save }),
         field('把这些“正文”当成错误（每行一个正则）', textArea(r, 'errorPatterns', { rows: 3, code: true, onChange: save }), '有的中转会把上游报错当成正常回复返回，命中这里的短回复会被当作失败重试'),
     ));

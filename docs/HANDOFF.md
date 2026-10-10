@@ -208,6 +208,8 @@ docs/HANDOFF.md         本文档
 
 **写入位置**（`locateReply`）：先找带任务号的占位；否则核对 `anchor`，normal 要求文件正好 `index` 条（或 `index + 1` 条且最后一条是 `replace`）、swipe 要求那一楼的 swipe 数等于 `swipeId`、continue 要求那一楼的正文还是 `baseText`。对不上（别处删改过楼层）就把回复作为新的一条加到末尾并标 `orphan`，宁可多一条也不丢
 
+**接口迟迟不回应**（2026-10-10 晚加的，用户定的 30 秒）：流式请求发出去后，`openUpstream`（`server/proxy.mjs`）等上游“开口”——响应头加第一块数据——最多等 `settings.retry.firstByteSec` 秒（默认 30，设置 › 通用 › 自动重试里能改，0 = 不限），到点断开这一次、报 504，按重试设置重来。开口之后这条限制就不管了。非流式请求（比如用结构化输出的变量更新）不套这条。页面直连的 `/api/llm` 和服务器代生成走的是同一个函数。起因：一次请求发给中转后 5 分钟没有任何回应，Node 的 fetch 默认等满 5 分钟才报 `UND_ERR_HEADERS_TIMEOUT`。思考很久才开口的模型如果被误判，把这个数调大
+
 **保护**：同一个聊天已有 running / awaiting_ack / persisting 的任务时再开新的回 409 `gen-busy`（页面提示后接过去显示那个任务）；任务号重复回 409。服务器重启丢掉内存里的任务：页面的流 / 认领收到 404，提示“服务器上找不到这次生成了”，已经显示的部分按停止处理保留，没有内容就回滚占位
 
 **部署时**：nginx 不用改——`/api/gen/` 走 `location /`，那里已经 `proxy_buffering off`、读超时 600 秒（心跳 10 秒一次），`text/event-stream` 不在 gzip 列表里；服务端也带了 `X-Accel-Buffering: no`。宽限期要改就在 systemd 单元的启动参数加 `--gen-grace`。任务在内存里，`systemctl restart` 会丢掉进行中的任务（页面会提示并保留已显示的部分）

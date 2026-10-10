@@ -13,7 +13,8 @@ export class GenError extends Error {
 }
 
 /** 重试设置的默认值（和设置面板一致；state.js 的 DEFAULT_SETTINGS 也用这一份） */
-export const DEFAULT_RETRY = { enabled: true, maxRetries: 2, delayMs: 2000, onEmpty: true, errorPatterns: 'failed with status (429|5\\d\\d)\nrate limit exceeded' };
+/** firstByteSec：流式请求等接口“开口”（第一块数据）最多等多少秒，超时算一次可重试的失败；0 = 不限（由运行环境决定，Node 默认 5 分钟） */
+export const DEFAULT_RETRY = { enabled: true, maxRetries: 2, delayMs: 2000, onEmpty: true, firstByteSec: 30, errorPatterns: 'failed with status (429|5\\d\\d)\nrate limit exceeded' };
 
 /** “错误当正文”的识别规则：设置里每行一个正则，写坏的跳过 */
 export function errorPatterns(retry) {
