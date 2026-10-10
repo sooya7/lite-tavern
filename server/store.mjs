@@ -509,6 +509,11 @@ const NOISE_TAGS = /<(think|thinking|reasoning|acg_think|story_driver|logic_chec
 /** 从一条楼层里挑出给列表看的那一小段：先找正文标签，没有就去掉思维链、状态栏等标签块，剩下的去 HTML、压空白 */
 export function previewText(mes, max = 120) {
     let t = String(mes ?? '');
+    // 只有结尾没有开头的标签（</think>、</konatan_planning~> 这类）：前面那段是没包好的思维链，整段跳过
+    for (const m of [...t.matchAll(/<\/([^\s<>/]+)>/g)].reverse()) {
+        const name = m[1].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        if (!new RegExp(`<${name}[\\s>]`).test(t.slice(0, m.index))) { t = t.slice(m.index + m[0].length); break; }
+    }
     for (const tag of PROSE_TAGS) {
         const re = new RegExp(`<${tag}\\b[^>]*>([\\s\\S]*?)</${tag}>`, 'gi');
         const all = [...t.matchAll(re)].map(m => m[1]).filter(x => x.replace(/<[^>]*>/g, '').trim());
