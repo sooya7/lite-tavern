@@ -24,13 +24,14 @@ command -v rclone >/dev/null 2>&1 || die "没有 rclone"
 [[ -f "$RCLONE_CONFIG" ]] || die "找不到 rclone 配置 $RCLONE_CONFIG"
 [[ -d "$LT_DATA" ]] || die "找不到轻酒馆数据目录 $LT_DATA"
 [[ "$LOCAL_KEEP" =~ ^[1-9][0-9]*$ && "$REMOTE_KEEP" =~ ^[1-9][0-9]*$ ]] || die "保留份数必须是正整数"
-RCLONE=(rclone --config "$RCLONE_CONFIG")
+# 代理坏的时候连接会挂着不动：连不上 20 秒、没数据 2 分钟就放弃这一次，交给外面的重试
+RCLONE=(rclone --config "$RCLONE_CONFIG" --contimeout 20s --timeout 2m)
 
 retry() {
   local n=1
   until "$@"; do
     (( n >= TRIES )) && return 1
-    log "第 $n 次没成功，${TRY_SLEEP} 秒后重试（rclone ${4:-}）"
+    log "第 $n 次没成功，${TRY_SLEEP} 秒后重试（rclone ${8:-}）"
     sleep "$TRY_SLEEP"
     n=$((n + 1))
   done
