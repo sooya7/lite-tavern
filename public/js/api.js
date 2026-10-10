@@ -141,6 +141,19 @@ export const api = {
     createCharacter: (card) => request('POST', '/api/characters/create', card),
     deleteCharacter: (file, withChats) => { versions.delete(`characters/${file}`); return request('DELETE', `/api/characters/${enc(file)}?chats=${withChats ? 1 : 0}`); },
     importCharacter: (file) => request('POST', '/api/characters/import', file, { headers: { 'X-File-Name': enc(file.name) } }),
+    /** 让服务器按链接把角色卡文件下回来（目前只认 Discord 附件直链），返回一个 File，后面和选本地文件一样用 */
+    fetchCardUrl: async (url) => {
+        const res = await request('POST', '/api/characters/fetch-url', { url }, { raw: true });
+        if (!res.ok) {
+            let msg = `请求失败 ${res.status}`;
+            try { msg = (await res.json())?.error?.message ?? msg; } catch { /* 不是 JSON 就用状态码 */ }
+            throw new Error(msg);
+        }
+        let name = 'card';
+        try { name = decodeURIComponent(res.headers.get('X-File-Name') || 'card'); } catch { /* 保持默认 */ }
+        const blob = await res.blob();
+        return new File([blob], name, { type: blob.type });
+    },
     /** 用新版卡文件原地更新一张卡。手里记着的旧版本号作废，之后要重新读这张卡 */
     updateCharacter: (file, f) => { versions.delete(`characters/${file}`); return request('POST', `/api/characters/${enc(file)}/update`, f, { headers: { 'X-File-Name': enc(f.name) } }); },
     setCharacterAvatar: async (file, blob) => {

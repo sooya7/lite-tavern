@@ -9,6 +9,7 @@ import { exec } from 'node:child_process';
 import { Router, HttpError, sendJson, sendText, readBody, readJson, serveFile, safeJoin, notModified } from './server/http.mjs';
 import { Store, sanitizeName, defaultAvatar } from './server/store.mjs';
 import { proxyRequest } from './server/proxy.mjs';
+import { fetchCardFromUrl } from './server/fetch-url.mjs';
 import { GenJobs } from './server/gen-jobs.mjs';
 import { detectStDirs, scanStDir, importFromSt } from './server/st-import.mjs';
 import { registerStCompat, registerVectorApi, VectorStore, serveExtensionFile, csrfToken, EXT_URL_PREFIX } from './server/st-compat.mjs';
@@ -48,6 +49,8 @@ const config = {
     extDir: '',
     // 服务器代生成：生成完成后等页面确认多久（毫秒），过了就由服务器自己写进聊天
     genGraceMs: Math.max(1000, Number(args['gen-grace'] ?? process.env.LT_GEN_GRACE_MS ?? 15000) || 15000),
+    // 从链接下载角色卡时走的代理（服务器直连不了 Discord 时填，比如 socks5h://127.0.0.1:8082）；空 = 直连
+    fetchProxy: String(args['fetch-proxy'] ?? process.env.LT_FETCH_PROXY ?? ''),
 };
 config.extDir = path.resolve(String(args['extensions-dir'] ?? process.env.LT_EXTENSIONS ?? path.join(config.data, 'extensions')));
 
@@ -148,6 +151,19 @@ router.post('/api/characters/import', async (req) => {
     // 卡里自带了什么，导入完告诉界面一声（世界书已另存并绑定；脚本、正则留在卡里，打开这张卡就生效）
     const scripts = flattenScriptTrees(scriptTreesOf(card.data.extensions));
     return { file, name: card.data.name, world, scripts: scripts.length, scriptsOn: scripts.filter(x => x.on).length, regex: card.data.extensions?.regex_scripts?.length ?? 0 };
+});
+// 按链接把角色卡文件下回来交给页面（目前只认 Discord 附件直链）。页面拿到后走和选本地文件一样的流程
+router.post('/api/characters/fetch-url', async (req, res) => {
+    const { url } = await readJson(req);
+    const r = await fetchCardFromUrl(url, { proxy: config.fetchProxy });
+    res.writeHead(200, {
+        'Content-Type': r.png ? 'image/png' : 'application/json; charset=utf-8',
+        'Content-Length': r.bytes.length,
+        'Cache-Control': 'no-store',
+        'X-File-Name': encodeURIComponent(r.name),
+    });
+    res.end(r.bytes);
+    return undefined;
 });
 // 用新版卡文件原地更新一张卡（聊天记录保留，卡的内容和自带世界书直接覆盖，不留备份）
 router.post('/api/characters/:file/update', async (req, res, { file }) => {

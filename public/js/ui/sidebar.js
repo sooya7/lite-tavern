@@ -152,6 +152,7 @@ export function charMenu(anchor, c) {
         { label: '编辑角色卡', icon: 'edit', onClick: async () => { if (state.char?.file !== c.file) await selectCharacter(c.file); openPanel('char'); } },
         { label: c.fav ? '取消收藏' : '收藏', icon: 'star', onClick: () => toggleFav(c) },
         { label: '用新版卡文件更新…', icon: 'upload', onClick: () => updateChar(c) },
+        { label: '从链接更新…', icon: 'link', onClick: () => updateCharFromUrl(c) },
         { label: '导出 PNG 卡', icon: 'download', onClick: () => window.open(api.exportCharacterUrl(c.file, 'png'), '_blank') },
         { label: '导出 JSON', icon: 'download', onClick: () => window.open(api.exportCharacterUrl(c.file, 'json'), '_blank') },
         '-',
@@ -175,10 +176,39 @@ async function peekCardFile(f) {
  * 覆盖了找不回来，所以先读出新文件里的卡名给用户确认一眼，免得选错文件。
  */
 async function updateChar(c) {
-    const current = state.char?.file === c.file;
-    if (current && state.generating) { toast('正在生成，等这条回复结束再更新', 'warning'); return; }
+    if (updateBlocked(c)) return;
     const [f] = await pickFiles({ accept: '.png,.json' });
-    if (!f) return;
+    if (f) await applyCardUpdate(c, f);
+}
+
+/**
+ * 从链接更新：粘贴 Discord 里卡片文件的链接，服务器把文件下回来，后面和选本地文件一样。
+ * Discord 的附件链接大约一天就失效，所以不记链接，每次粘新的。
+ */
+async function updateCharFromUrl(c) {
+    if (updateBlocked(c)) return;
+    const url = await promptDialog('粘贴卡片文件的链接：\n在 Discord 里长按（电脑上右键）那个卡片文件，选“复制链接”。', '', { title: `从链接更新「${c.name}」`, placeholder: 'https://cdn.discordapp.com/attachments/…' });
+    if (!url?.trim()) return;
+    const tip = toast('正在下载…', 'info', 60000);
+    let f;
+    try {
+        f = await api.fetchCardUrl(url.trim());
+    } catch (e) {
+        toast(`没下下来：${e.message}`, 'error', 8000);
+        return;
+    } finally {
+        tip?.remove?.();
+    }
+    await applyCardUpdate(c, f);
+}
+
+const updateBlocked = (c) => {
+    if (state.char?.file === c.file && state.generating) { toast('正在生成，等这条回复结束再更新', 'warning'); return true; }
+    return false;
+};
+
+async function applyCardUpdate(c, f) {
+    const current = state.char?.file === c.file;
     let info;
     try {
         info = await peekCardFile(f);

@@ -1009,6 +1009,20 @@ def main():
             assert (got.get('card') or got)['data']['first_mes'] == '这是新版的开场白'
             # 这张卡正开着：界面跟着换成新版（顶栏名字），脚本照常在跑
             page.wait_for_function("() => document.querySelector('#topbar')?.innerText.includes('脚本测试卡·新版')", timeout=10000)
+            # 从链接更新：贴的不是文件链接时，说明该贴什么，卡不动
+            page.locator('#left button', has_text='首页').first.click()
+            page.wait_for_selector('#chat .home-wrap')
+            page.locator('#chat .home-tab', has_text='角色库').click()
+            card2 = page.locator('#chat .char-card', has=page.locator('.cc-name', has_text='脚本测试卡·新版')).first
+            card2.locator('button[title="更多"]').click()
+            page.locator('.menu button', has_text='从链接更新').click()
+            page.wait_for_selector('.modal input.input', timeout=5000)
+            page.fill('.modal input.input', 'https://discord.com/channels/1/2/3')
+            page.locator('.modal-foot button', has_text='确定').click()
+            page.wait_for_selector('#toasts .toast >> text=这是消息的链接', timeout=8000)
+            assert page.locator('.modal-foot').count() == 0, '链接不对时不该弹覆盖确认'
+            still = next(c for c in js("fetch('/api/characters').then(r => r.json())") if c['file'] == old['file'])
+            assert still['name'] == '脚本测试卡·新版' and still['version'] == '9.9', still
             # 改回原名，后面的用例按原名找这张卡
             with open(SCRIPT_CARD, 'rb') as f:
                 raw = f.read()
@@ -1017,7 +1031,7 @@ def main():
             page.reload(); enter_from_home()
             page.wait_for_selector('#chat .mes')
             page.wait_for_timeout(1200)
-        run('角色卡更新：用新版卡文件覆盖，聊天记录保留；选错文件不动', update_card)
+        run('角色卡更新：用新版卡文件覆盖，聊天记录保留；选错文件、贴错链接都不动', update_card)
 
         def method_select():
             return page.locator('#right .card', has=page.locator('.card-title', has_text='变量更新方式')).first.locator('select').first
