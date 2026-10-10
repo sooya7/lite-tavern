@@ -5,7 +5,7 @@
 // 所以和酒馆助手一样跑在同源 iframe 里：脚本能读写这里的全部数据、用配置好的模型连接。开关见 设置 › 角色 › 脚本。
 import { state, eventSource, event_types, saveChat, saveCharacter, savePreset } from '../state.js';
 import { getSession } from '../controller.js';
-import { activeScripts, flattenScriptTrees, scriptTreesOf, rewriteScriptSource, buttonEventName, loadsMvuBundle } from '../core/scripts.js';
+import { activeScripts, flattenScriptTrees, scriptTreesOf, rewriteScriptSource, buttonEventName } from '../core/scripts.js';
 import { MVU_EVENTS } from '../core/mvu.js';
 import { createScriptApi, installHostGlobals, registerScriptWindow, unregisterScriptWindow, dropGlobalsOf, dropInjectionsOf,
     applyInjections, expireInjections, toastr, YAML, findScriptRaw, setScriptHost } from './script-api.js';
@@ -480,5 +480,3 @@ export function scriptToggled(source) {
     if (source === 'preset') savePreset(); else if (source === 'character') saveCharacter();
     return syncScripts();
 }
-
-export { flattenScriptTrees, scriptTreesOf, loadsMvuBundle };

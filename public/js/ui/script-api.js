@@ -350,6 +350,7 @@ export function expireInjections() {
 
 export function dropInjectionsOf(owner) {
     for (const [id, inj] of [...injections]) if (inj.owner === owner) injections.delete(id);
+    for (let i = macroLikes.length - 1; i >= 0; i--) if (macroLikes[i].owner === owner) macroLikes.splice(i, 1);
 }
 
 // ---------- SillyTavern.getContext() ----------
