@@ -702,7 +702,7 @@ def main():
             # 输入框的 +：只有三种生成方式
             page.locator('#composer .composer-bar .tool').click()
             got = menu_labels()
-            assert got == ['继续写最后一条', '重新生成最后一条', '代我写一条（扮演用户）'], got
+            assert got == ['继续写最后一条', '重新生成最后一条', '代我写一条（扮演用户）', '开始新聊天'], got
             close_menu()
             # 标题菜单：只有对这个聊天本身的操作
             page.locator('#topbar .title-btn').click()
@@ -723,6 +723,52 @@ def main():
             assert page.locator('#left .side-head button').count() == 1, '左栏头部应该只剩“收起”'
             assert page.locator('#topbar .tb-btn.toggle-right').inner_text().strip() == '设置'
         run('每个功能只留一个入口（+ / 标题 / 消息菜单 / 左栏）', one_home_per_feature)
+
+        def new_chat_from_plus():
+            # 输入框的 + 里“开始新聊天”：提示框居中，带“同时删除当前聊天文件”，按钮是 确定 / 否
+            chat_count = lambda: page.locator('#left .chat-item').count()
+            cid = current_chat()[0]
+            listed = lambda: [c['name'] for c in page.evaluate(f"fetch('/api/chats/' + encodeURIComponent({json.dumps(cid)})).then(r => r.json())")]
+
+            def open_dialog():
+                page.locator('#composer .composer-bar .tool').click()
+                page.locator('.menu button', has_text='开始新聊天').click()
+                page.wait_for_selector('.modal.modal-center', timeout=5000)
+
+            n0 = chat_count()
+            before = listed()
+            open_dialog()
+            assert page.locator('.modal.modal-center .modal-head').inner_text().strip() == '开始新的聊天？'
+            assert_in('同时删除当前聊天文件', page.locator('.modal.modal-center .modal-body').inner_text(), '提示框')
+            assert [t.strip() for t in page.locator('.modal.modal-center .modal-foot button').all_inner_texts()] == ['确定', '否']
+            assert not page.locator('.modal.modal-center .modal-head .icon-btn').is_visible(), '这个提示框不要右上角的关闭键'
+            page.screenshot(path=os.path.join(SHOTS, '13-new-chat-dialog.png'))
+            page.locator('.modal.modal-center .modal-foot button', has_text='否').click()
+            page.wait_for_timeout(300)
+            assert page.locator('.modal').count() == 0 and chat_count() == n0 and listed() == before, '点“否”什么都不该变'
+            # 不勾：多一个聊天，旧的还在
+            open_dialog()
+            page.locator('.modal.modal-center .modal-foot button', has_text='确定').click()
+            page.wait_for_function(f"() => document.querySelectorAll('#left .chat-item').length === {n0 + 1}", timeout=8000)
+            assert mes_count() == 1, f'新聊天应该只有开场白，实际 {mes_count()} 条'
+            after1 = listed()
+            assert set(before) <= set(after1) and len(after1) == len(before) + 1, (before, after1)
+            fresh = [x for x in after1 if x not in before][0]
+            # 勾上：开一个新的，同时把刚才那个删掉（总数不变）
+            page.wait_for_timeout(1100)  # 聊天名带时间，隔一秒免得重名
+            open_dialog()
+            page.locator('.modal.modal-center .modal-body input[type=checkbox]').check()
+            page.locator('.modal.modal-center .modal-foot button', has_text='确定').click()
+            page.wait_for_function("() => !document.querySelector('.modal')", timeout=5000)
+            t0 = time.time()
+            while fresh in listed() and time.time() - t0 < 8:
+                time.sleep(0.3)
+            after2 = listed()
+            assert fresh not in after2, f'勾了删除，旧聊天还在：{after2}'
+            assert len(after2) == len(after1) and set(before) <= set(after2), (after1, after2)
+            page.wait_for_function(f"() => document.querySelectorAll('#left .chat-item').length === {n0 + 1}", timeout=8000)
+            assert mes_count() == 1
+        run('输入框 +：开始新聊天（居中的提示框，可选同时删除当前聊天）', new_chat_from_plus)
 
         def preset_chip():
             page.locator('#composer-preset').click()

@@ -606,6 +606,15 @@ a { color: var(--accent); }
 .modal-head { padding: 16px 14px 8px 20px; font-family: var(--font-read); font-weight: 500; font-size: 18px; display: flex; align-items: center; gap: 8px; }
 .modal-body { padding: 4px 20px 14px; overflow-y: auto; min-height: 0; }
 .modal-foot { padding: 10px 16px 16px; display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
+/* 小的确认框（开始新聊天）：标题、勾选项、按钮都居中，不要右上角的关闭键 */
+.modal.modal-center { width: min(360px, 100%); text-align: center; }
+.modal-backdrop:has(> .modal-center) { backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
+.modal.modal-center .modal-head { justify-content: center; padding: 22px 20px 6px; font-weight: 600; }
+.modal.modal-center .modal-head .icon-btn { display: none; }
+.modal.modal-center .modal-body { padding: 6px 20px 8px; display: flex; justify-content: center; }
+.modal.modal-center .modal-body .check { align-items: center; color: var(--text-2); }
+.modal.modal-center .modal-foot { justify-content: center; gap: 14px; padding: 10px 16px 20px; }
+.modal.modal-center .modal-foot .btn { min-width: 64px; }
 .toasts { position: fixed; z-index: 200; top: calc(14px + env(safe-area-inset-top)); left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; gap: 8px; pointer-events: none; width: min(440px, 92vw); }
 .toast {
     background: var(--surface); border: 1px solid var(--line-2); border-radius: 12px; padding: 10px 14px; box-shadow: var(--shadow);

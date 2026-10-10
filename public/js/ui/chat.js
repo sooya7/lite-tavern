@@ -2,7 +2,7 @@
 import { h, $, clear, icon, iconBtn, toast, confirmDialog, popupMenu, formatTime, modal } from './dom.js';
 import { state, eventSource, event_types, saveChat, saveSettings, activePersona, activeConnection } from '../state.js';
 import { api } from '../api.js';
-import { getSession, editMessage, deleteMessages, toggleHidden, branchChat, setPreset, refresh } from '../controller.js';
+import { getSession, editMessage, deleteMessages, toggleHidden, branchChat, setPreset, refresh, newChat } from '../controller.js';
 import { generate, stopGeneration } from '../generate.js';
 import { formatMessage, mountFormatted, renderReasoning } from './render.js';
 import { mountFrontend, refreshSnapshots } from './frontend.js';
@@ -443,8 +443,44 @@ function composerMenu(anchor) {
         { label: '继续写最后一条', icon: 'continue', onClick: () => generate('continue') },
         { label: '重新生成最后一条', icon: 'refresh', onClick: () => generate('regenerate') },
         { label: '代我写一条（扮演用户）', icon: 'mask', onClick: () => generate('impersonate') },
+        '-',
+        { label: '开始新聊天', icon: 'message', onClick: startNewChat },
         ...extensionMenuItems(),
     ]);
+}
+
+/**
+ * “+”菜单里的开始新聊天（2026-10-10 用户要的；提示框照酒馆的样子：居中的标题、一个勾选项、确定 / 否）。
+ * 勾了“同时删除当前聊天文件”就先开好新的再删旧的（旧的移到回收站），中间不会出现没有聊天的空档。
+ */
+async function startNewChat() {
+    if (!state.char) return;
+    if (state.generating) { toast('正在生成，先停止再开新聊天', 'warning'); return; }
+    const old = state.chat?.name;
+    const box = h('input', { type: 'checkbox' });
+    const m = modal({
+        title: '开始新的聊天？',
+        body: h('label', { class: 'check' }, box, h('span', {}, '同时删除当前聊天文件')),
+        actions: [{ label: '确定', value: true, primary: true }, { label: '否', value: false }],
+    });
+    m.el.classList.add('modal-center');
+    if (!await m.done) return;
+    const remove = box.checked;
+    try {
+        await newChat();
+    } catch (e) {
+        toast(`开新聊天失败：${e.message}`, 'error');
+        return;
+    }
+    if (!remove || !old || state.chat?.name === old) return;
+    try {
+        await api.deleteChat(state.char.id, old);
+        eventSource.emit('chat_deleted', old);
+    } catch (e) {
+        if (e.status !== 404) toast(`新聊天已经开好，但旧聊天没删掉：${e.message}`, 'error'); // 404 = 旧的还没存过盘，本来就没有文件
+    }
+    state.chatList = await api.listChats(state.char.id);
+    refresh(['sidebar']);
 }
 
 /** 酒馆插件放进“魔棒菜单”（#extensionsMenu）里的入口：轻酒馆把它们列在 + 菜单里，点了转给原来的元素 */
