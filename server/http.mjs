@@ -19,6 +19,7 @@ export class Router {
     get(p, h) { this.add('GET', p, h); }
     post(p, h) { this.add('POST', p, h); }
     put(p, h) { this.add('PUT', p, h); }
+    patch(p, h) { this.add('PATCH', p, h); }
     delete(p, h) { this.add('DELETE', p, h); }
 
     match(method, pathname) {
@@ -42,14 +43,32 @@ export class HttpError extends Error {
     }
 }
 
+/**
+ * 大文件（角色卡、聊天、世界书）按版本号做协商缓存：没改过就回 304，手机上再点进去不用重新下载几 MB。
+ * 返回 true 表示已经回了 304，调用方直接结束。
+ */
+export function notModified(req, res, version) {
+    if (!version) return false;
+    const tag = `"${String(version).replace(/"/g, '')}"`;
+    res.setHeader('ETag', tag);
+    res.setHeader('Cache-Control', 'no-cache');
+    const got = String(req.headers['if-none-match'] ?? '').split(',').map(x => x.trim().replace(/^W\//, ''));
+    if (got.includes(tag)) {
+        res.writeHead(304);
+        res.end();
+        return true;
+    }
+    return false;
+}
+
 export function sendJson(res, status, data) {
     const body = JSON.stringify(data);
-    res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+    res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': res.getHeader('Cache-Control') ?? 'no-store' });
     res.end(body);
 }
 
 export function sendText(res, status, text, type = 'text/plain; charset=utf-8') {
-    res.writeHead(status, { 'Content-Type': type, 'Cache-Control': 'no-store' });
+    res.writeHead(status, { 'Content-Type': type, 'Cache-Control': res.getHeader('Cache-Control') ?? 'no-store' });
     res.end(text);
 }
 
@@ -112,12 +131,12 @@ export function serveFile(req, res, file, { cache = 'no-cache' } = {}) {
             return;
         }
         const etag = `W/"${st.size.toString(16)}-${Math.floor(st.mtimeMs).toString(16)}"`;
-        if (req.headers['if-none-match'] === etag) {
+        if (cache !== 'no-store' && req.headers['if-none-match'] === etag) {
             res.writeHead(304, { ETag: etag });
             res.end();
             return;
         }
-        res.writeHead(200, { 'Content-Type': mimeOf(file), 'Content-Length': st.size, ETag: etag, 'Cache-Control': cache });
+        res.writeHead(200, { 'Content-Type': mimeOf(file), 'Content-Length': st.size, ...(cache === 'no-store' ? {} : { ETag: etag }), 'Cache-Control': cache });
         if (req.method === 'HEAD') return res.end();
         fs.createReadStream(file).pipe(res);
     });

@@ -10,6 +10,7 @@ import { messageText, setSwipe, deleteSwipe, ensureSwipes } from '../core/chat.j
 import { parseSendDate } from '../core/util.js';
 import { renderHome } from './library.js';
 import { charAvatar, letterAvatar } from './avatars.js';
+import { applyMacroLikes } from './script-api.js';
 import { chatTitle, renameChat, exportChat, deleteChat } from './sidebar.js';
 
 // 聊天页一次显示多少楼（设置 › 通用 › 外观，和酒馆的“加载消息数”一个意思）；0 = 全部
@@ -63,6 +64,7 @@ export function renderChat() {
     if (home) {
         renderHome(el);
         if (scrollEl()) scrollEl().scrollTop = 0;
+        eventSource.emit('character_page_loaded');
         return;
     }
     if (!state.chat) {
@@ -160,6 +162,8 @@ async function fillMessage(el, i, { streaming = false } = {}) {
         text = messageText(m);
     } else {
         text = await session.displayText(i);
+        // 脚本登记的助手宏（registerMacroLike）在显示时替换
+        text = applyMacroLikes(text, { message_id: i, role: m.is_user ? 'user' : m.is_system ? 'system' : 'assistant' });
     }
     if (el._renderToken !== token) return;
     const res = formatMessage(text, { charName: session.names.char, isUser: m.is_user });
@@ -223,15 +227,36 @@ function scrollToBottom(force = false) {
     if (force || stickToBottom) s.scrollTop = s.scrollHeight;
 }
 
+/** 正在读的那一楼：顶部已经滚出视口、但还占着视口上沿的消息 */
+function readingMessage(s) {
+    const top = s.getBoundingClientRect().top;
+    for (const el of s.querySelectorAll('.mes')) {
+        const r = el.getBoundingClientRect();
+        if (r.bottom <= top + 40) continue;
+        return r.top < top - 60 ? { el, offset: r.top - top } : null;
+    }
+    return null;
+}
+
 export function initScrollTracking() {
     const s = scrollEl();
-    const btn = h('button', { class: 'scroll-bottom', title: '到底部', hidden: true, onclick: () => { stickToBottom = true; scrollToBottom(true); } }, icon('chevronDown'));
-    $('#center').append(btn);
-    s.addEventListener('scroll', () => {
+    const down = h('button', { class: 'scroll-btn scroll-bottom', title: '到底部', hidden: true, onclick: () => { stickToBottom = true; scrollToBottom(true); } }, icon('chevronDown'));
+    const up = h('button', { class: 'scroll-btn scroll-mes-top', title: '回到这楼开头', hidden: true, onclick: () => {
+        const cur = readingMessage(s);
+        if (!cur) return;
+        stickToBottom = false;
+        s.scrollTo({ top: s.scrollTop + cur.offset - 8, behavior: 'smooth' });
+    } }, icon('arrowUp'));
+    $('#center').append(h('div', { class: 'scroll-btns' }, up, down));
+    let raf = 0;
+    const update = () => {
+        raf = 0;
         const atBottom = s.scrollHeight - s.scrollTop - s.clientHeight < 80;
         stickToBottom = atBottom;
-        btn.hidden = atBottom;
-    }, { passive: true });
+        down.hidden = atBottom;
+        up.hidden = !readingMessage(s);
+    };
+    s.addEventListener('scroll', () => { if (!raf) raf = requestAnimationFrame(update); }, { passive: true });
 }
 
 async function swipe(i, dir) {
@@ -252,6 +277,8 @@ async function swipe(i, dir) {
     renderMessage(i);
     refreshSnapshots();
     await eventSource.emit(event_types.MESSAGE_SWIPED, i);
+    // 开场白（第一楼、角色说的）换了版本：酒馆另外发一个“选了哪个开场白”
+    if (i === 0 && !m.is_user) await eventSource.emit('character_first_message_selected', { input: m.mes, output: m.mes, character: state.char?.card?.data?.name ?? '' });
     saveChat();
 }
 
@@ -287,7 +314,7 @@ function messageMenu(anchor, i) {
     popupMenu(anchor, [
         { label: m.is_system ? '取消隐藏（重新发给 AI）' : '隐藏（不发给 AI）', icon: m.is_system ? 'eye' : 'eyeOff', onClick: () => toggleHidden(i) },
         { label: '从这里分支', icon: 'branch', onClick: () => branchChat(i) },
-        Array.isArray(m.swipes) && m.swipes.length > 1 ? { label: '删除当前这个回复版本', icon: 'x', onClick: () => { deleteSwipe(m); getSession()?.vars.invalidate(); renderMessage(i); saveChat(); } } : null,
+        Array.isArray(m.swipes) && m.swipes.length > 1 ? { label: '删除当前这个回复版本', icon: 'x', onClick: () => { const sid = m.swipe_id ?? 0; deleteSwipe(m); getSession()?.vars.invalidate(); renderMessage(i); saveChat(); eventSource.emit('message_swipe_deleted', { messageId: i, swipeId: sid, newSwipeId: m.swipe_id ?? 0 }); } } : null,
         m.extra?.reasoning ? { label: '查看思维链原文', icon: 'brain', onClick: () => modal({ title: '思维链', body: h('pre', { style: { whiteSpace: 'pre-wrap' } }, m.extra.reasoning), wide: true }) } : null,
         Array.isArray(m.variables) && m.variables[m.swipe_id ?? 0] ? { label: '查看本层变量', icon: 'variable', onClick: () => modal({ title: `#${i} 楼层变量`, wide: true, body: h('div', { class: 'var-tree' }, JSON.stringify(m.variables[m.swipe_id ?? 0], null, 2)) }) } : null,
         '-',

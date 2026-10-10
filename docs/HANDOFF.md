@@ -1,6 +1,6 @@
 # 轻酒馆 交接文档
 
-更新：2026-10-10
+更新：2026-10-10（页面版本 20261010h22；本轮加了服务器代生成，见 3.8 节）
 
 ## 1. 项目是什么
 
@@ -15,7 +15,9 @@ server.mjs              入口：参数解析、路由、静态文件、登录
 server/
   http.mjs              Router、读写 body、静态文件（带 ETag）
   store.mjs             数据目录读写：角色卡 PNG、聊天 JSONL、预设/世界书 JSON、设置、密钥、备份、回收站
-  proxy.mjs             LLM 代理：浏览器只发 {path, body}，服务端补地址和密钥后转发，流式原样回传
+  proxy.mjs             LLM 代理：浏览器只发 {path, body}，服务端补地址和密钥后转发，流式原样回传（openUpstream 也给代生成用）
+  gen-jobs.mjs          服务器代生成的任务表：起任务请求上游、带 seq 的事件缓存与 SSE 续传、取消 / 认领 / 确认、宽限期到点代写（3.8 节）
+  gen-persist.mjs       服务器代写回复：用 public/js/core 同一套代码建会话、收尾、算变量，写进聊天文件
   st-import.mjs         从酒馆数据目录检测/扫描/导入（只读源目录，保留原文件修改时间）
   thumb.mjs             头像缩略图：纯 zlib 解码 PNG → 按块平均缩小 → 重新编码（缓存在 data/_cache/thumbs）
 public/
@@ -27,20 +29,29 @@ public/
   js/core/              纯逻辑，不碰 DOM，Node 里可直接测
     util.js png.js macros.js regex.js worldinfo.js ejs.js tokens.js
     preset.js prompt.js card.js providers.js chat.js vars.js mvu.js template.js session.js
+    mvu-extra.js        额外模型解析：设置默认值、世界书筛选、请求组装、请求策略、增量校正、角色卡覆盖（纯函数）
+    mvu-cleanup.js      楼层变量的自动清理 / 恢复 / 快照 / 重演 / 聊天变量同步（纯函数）
     scripts.js          脚本库的数据结构：规范化、展开文件夹、哪些该运行、MVU 加载脚本的识别
     thformat.js         酒馆助手接口用的世界书 / 预设 / 正则结构 ↔ 酒馆文件格式
+    llm.js              读模型回复、按设置重试（GenError / readLlmResponse / generateWithRetry），页面和服务器代生成共用
+    reply.js            一条回复的收尾：放占位、拆思维链、永久正则、写回楼层、变量更新；代生成时找回写入位置（locateReply）
+    mvu-request.js      额外模型解析的请求（原来在 generate.js，挪过来给服务器代写用），浏览器相关的东西经 env 传入
   js/                   应用层
     api.js state.js controller.js generate.js app.js
+    mvu-ops.js          MVU 修复按钮、增量校正、角色卡覆盖的保存、通知、删楼层后恢复变量（见 3.5 节“MVU 面板”）
     chatops.js          给前端卡和脚本共用的楼层读写、斜杠命令子集
+    genjob.js           服务器代生成的前端一侧：开任务、收流（断线按 seq 续上）、停止、认领、找回任务
   js/ui/                界面
     dom.js render.js frontend.js chat.js sidebar.js library.js avatars.js importers.js form.js
     scripts.js          脚本宿主：起停脚本 iframe、收拾脚本留在页面上的东西、脚本按钮、脚本的设置界面
     script-api.js       酒馆助手接口的实现（脚本 iframe 里的全局函数、window.TavernHelper / SillyTavern / Mvu）
     panels/ index nav search connection preset char world regex scripts persona note vars inspector settings import
 test/core.test.mjs      核心单元测试（21 项）
+test/mvu-extra.test.mjs, test/mvu-panel.test.mjs  MVU 额外模型解析、面板对齐原版的部分
+test/gen-jobs.test.mjs  服务器代生成：断开不中断、seq 续传、取消、确认 / 不重复写、同一聊天的保护、代写的回复和变量与页面算的一致
 tools/
   e2e.py                Playwright 端到端测试
-  mock-llm.mjs          假模型服务（OpenAI / Claude / Gemini，可模拟 429、错误正文、空回复、慢速）
+  mock-llm.mjs          假模型服务（OpenAI / Claude / Gemini，可模拟 429、错误正文、空回复、慢速；流式没发完被断开时计数 ABORTED）
   fixtures/test-card.json  端到端用测试卡（MVU + 世界书 + 正则 + 前端卡 + EJS）
   fixtures/script-card.json, script-preset.json  端到端用：自带世界书、正则、酒馆助手脚本的卡和预设
   check-imports.mjs     前端模块导入导出静态检查
@@ -77,14 +88,20 @@ docs/HANDOFF.md         本文档
 1. 先占住 `state.generating`（防连点），`flushPending()` 把待保存的设置写盘（代理从 `settings.json` 读连接配置，不写盘会用旧地址）
 2. `addUserMessage` → 永久正则 → 宏替换 → 入聊天
 3. `ChatSession.preparePrompt()`：楼层正则（带深度）→ 世界书（EJS 预处理 → 激活）→ `buildChatCompletion` 按预设顺序组装 → EJS 对每条消息求值
-4. `buildRequest` 按接口类型拼请求体 → `/api/llm/:conn` 代理 → SSE 解析，流式写入 `m.mes` 并重绘
+4. `buildRequest` 按接口类型拼请求体 → 普通生成 / 重刷 / 继续写交给服务器代生成（`/api/gen`，3.8 节），页面订阅它的 SSE，流式写入 `m.mes` 并重绘；代我写、静默生成、旧服务端仍是浏览器经 `/api/llm/:conn` 代理直接请求
    - 组提示词前发 `GENERATION_AFTER_COMMANDS` / `GENERATION_STARTED`，把脚本 `injectPrompts` 注入的内容并进扩展提示词；拼请求体前发 `CHAT_COMPLETION_SETTINGS_READY`，监听者可以原地改 `messages` 和采样参数（预设脚本靠它合并消息、加前缀）
-5. 失败按设置重试（429/5xx/网络错误/错误当正文/空回复）；中途停止保留已生成部分；失败回滚占位（重新生成会恢复被删的旧回复）
-6. 收尾：拆 `<think>` 思维链 → 永久正则 → 同步 swipe → MVU 基于上一层变量应用本条更新（有脚本监听 MVU 事件时边更新边发事件，见 3.5）→ 卡里有正则用到 `<StatusPlaceHolderImpl/>` 时把它补到正文末尾 → 保存 → 广播事件给前端卡
+5. 失败按设置重试（429/5xx/网络错误/错误当正文/空回复；代生成时由服务器重试，判断规则在 `core/llm.js`，两边一样）；中途停止保留已生成部分；失败回滚占位（重新生成会恢复被删的旧回复）
+6. 收尾（`generate.js` 的 `completeReply`，步骤本身在 `core/reply.js`）：拆 `<think>` 思维链 → 永久正则 → 同步 swipe → 额外模型解析（开着时）→ MVU 基于上一层变量应用本条更新（有脚本监听 MVU 事件时边更新边发事件，见 3.5）→ 卡里有正则用到 `<StatusPlaceHolderImpl/>` 时把它补到正文末尾 → 自动清理 → 保存（代生成时带任务号保存 = 确认）→ 广播事件给前端卡
 
 **显示一条消息**（`ui/chat.js` → `fillMessage`）：`session.displayText()`（仅显示正则 + EJS 渲染）→ `formatMessage()`（引号高亮、showdown、DOMPurify、`<style>` 作用域化）→ 代码块里的完整 HTML 文档挂成沙箱 iframe（`ui/frontend.js`）。
 
 **前端卡**：iframe 是 `sandbox` 无同源。读接口（`getAllVariables`、`getChatMessages`、`Mvu.getMvuData` 等）用宿主注入的快照同步返回；写接口（`createChatMessages`、`setChatMessages`、`triggerSlash`、`replaceVariables`、`generate` / `generateRaw`）走 postMessage RPC，由 `chatops.js` / `generate.js` 里的函数执行。斜杠命令只支持一个子集（见 `chatops.js` 的 `triggerSlash`）。前端卡 `eventEmit` 的事件会同时发给脚本，脚本 `eventEmit` 的自定义事件也会转给前端卡。
+
+### 聊天和角色卡的流量（2026-10-10）
+
+- 保存聊天只传改动：`PATCH /api/chats/:char/:name`，体为 `{baseCount, count, set: {行号: 整行}, edit: {行号: 字段级操作}}`，带 `X-Expect` 版本号。前端拿上次读 / 写时的各行（`chat.base`）对比，新楼层整行、改过的楼层按字段（`core/jsondiff.js`，参照 Luker 的 JSON Patch 做法）。服务端行数对不上回 409 `patch-base`，前端自动退回整份 `PUT`
+- 下载走本机缓存：聊天和角色卡存在浏览器 IndexedDB（`lt-cache`，最多 12 个），请求带 `If-None-Match`，没变就 304 用本机那份；保存后同步更新缓存
+- Luker 对比：它上传也是按字段打补丁（还带 `test` 守卫），但打开聊天每次整份下载，没有缓存
 
 ## 3.5 酒馆助手脚本（2026-10-10）
 
@@ -111,6 +128,21 @@ docs/HANDOFF.md         本文档
 - MVU 打包文件不真的加载。只做这一件事的脚本（`isMvuLoaderOnly`）不起；别的脚本里 import 它的地址会被换成 `/script-stubs/mvu.js`。`Mvu` 全局对象是内置实现给的（`getMvuData / replaceMvuData / parseMessage / events …`），`waitGlobalInitialized('Mvu')` 立即完成
 - 有脚本监听 MVU 事件时，更新走 `core/mvu.js` 的 `processMessageWithEvents`：`mag_variable_update_started` → 解析命令 → `mag_command_parsed`（命令是 MVU 的 `CommandInfo` 格式，参数是原文字符串，监听者可以改、可以加）→ `mag_command_parsed_for_zod` / `_ended_for_zod` → 执行剩下的命令 → `mag_variable_update_ended`（监听者原地改变量）→ `_for_zod` → `mag_before_message_update`。顺序和参数与 MagVarUpdate 一致，所以卡里的变量结构脚本（`registerMvuSchema`，它自己从 jsdelivr 取 StageDog 的 `mvu_zod.js`）不用改就能工作：它在 `_for_zod` 事件里按结构校验并执行命令，不合结构的丢弃。没人监听时走原来不发事件的 `processMessage`，行为和以前完全一样；单测保证两条路结果一致
 - 新聊天初始化变量后会发 `mag_variable_initialized`（每个开场白一次），变量结构脚本靠它补默认值；脚本比聊天晚就绪时在它注册监听的那一刻补发
+- **变量单独更新 / MVU 面板**（2026-10-10 第二轮：对齐 MagVarUpdate 原版面板）。设置在 设置 › 本聊天 › 变量，全部存在 `settings.power` 里、对所有聊天生效（默认值见 `core/mvu-extra.js` 的 `MVU_DEFAULTS`）。照原版顺序直接摊开成卡片：通知设置 → 变量更新方式 → 修复按钮 → 自动清理变量 → 兼容性 → 角色卡覆盖；只有看变量内容的三栏（角色状态 / 本聊天变量 / 全局变量）默认折叠。没打开聊天时设置卡片也显示（修复按钮和角色卡覆盖不可用）
+  - 变量更新方式：随 AI 输出 / 额外模型解析（`mvuSeparate`）。选额外模型解析（或角色卡覆盖成它）时才出现四个小标题：
+    - 请求内容 `mvuPromptMode`：`builtin` 内置 / `preset` 使用当前预设 / `other` 使用其他预设（`mvuOtherPreset`）。内置的顺序照原版“内置破限”但**不带任何破限头尾**：开头提示词 `mvuHeadPrompt` → `<additional_information>` 用户设定、角色描述、世界书前 / 后（再加上预设里教写更新块的提示词，正文那边删掉了）`</additional_information>` → `<past_observe>` 前 `mvuHistory` 楼 + 本楼 `</past_observe>` → 剧情发生前的变量（`<previous_variables>`）→ 任务说明（`buildTask`，自己写的中性措辞，标签 `<variable_update_task>`）→ 结尾提示词 `mvuTailPrompt` → 一句用户消息。开头 / 结尾默认空。用预设时（`buildMvuRequest` 里 `preparePrompt({mvuPhase: 'update', presetOverride})`）任务在深度 0、`<past_observe>` / `</past_observe>` 在深度 2 / 1（`presetTaskInjects`），采样参数用那份预设的。原版“使用其他预设”是把预设拆成 ordered_prompts + 注入；这里直接用那份预设整套组提示词，效果相同
+    - 世界书筛选（`filterUpdateBooks`，原版 filterEntries 额外分析阶段）：只带 `[mvu_plot]` 的不给变量更新；不带标签的两边都给；`[mvu_update]` 只给变量更新（正文那边 `filterPlotBooks` 去掉，另外仍按内容识别去掉 `isMvuUpdateRule` 的条目）。角色主世界书有标签时，全局 / 聊天 / 用户世界书里没标签的整本不给变量更新，面板上提示“未适配”（`unsupportedWorlds`）。白名单 / 黑名单正则 `mvuWhitelist` / `mvuBlacklist`（`/源码/标志` 或直接写 `a|b`，`compileEntryRegex`），和角色卡的叠加：白名单任一命中保留，黑名单任一命中去掉，`[mvu_update]` 条目不受影响；无效正则提示后忽略。上次被筛掉的条目存在 `state.mvuLastFilter`，“上次分析被筛选的条目”按钮弹表格。**和原版不同**：原版角色卡没适配时整个不做额外模型解析，这里照做（黑白名单也生效）
+    - 请求策略：`mvuRequestMode` seq 依次请求失败后重试 / parallel 同时请求多次 / once-then-parallel 先一次再同时，`mvuRequestCount`（`runWithStrategy`；解析不出更新也算失败；手动停止不再重试；同时请求时其余的中止）。`mvuAuto` 自动请求：关了 AI 回复后不请求（楼层照常从上一楼抄变量），需要时点“重试额外模型解析”
+    - 模型来源 `mvuConnection` / `mvuModel`（获取模型列表）、结构化输出 `mvuSchema`（接口 4xx 退回文本）
+    - 高级参数 `mvuMaxTokens mvuTemperature mvuFreqPenalty mvuPresPenalty mvuTopP mvuTopK`，留空 = 默认（内置时温度 ≤0.3、回复上限 ≥2048，其余跟预设）；填了的经 `applyAdvancedParams` 进 `buildRequest`，三家接口各自换算
+  - 请求流程：`generate.js` 的 `buildMvuRequest`（拼消息）→ `requestVarUpdate`（按策略请求，可传 `validate`、自定义任务）→ `writeUpdateBlock`（写回正文末尾、状态栏占位符之前）→ `applyMvuAsync`。正文自己写了更新块时不请求；被中途停止的回复不更新
+  - 修复按钮（`mvu-ops.js`）：重新处理变量（最后一楼按上一楼重算）、重新读取初始变量（`mergeInitVars`：[initvar] 补新字段、更新描述，写到最后一楼）、快照楼层、重演楼层（`replayRange`）、重试额外模型解析（任选一楼，默认最后一条回复）、增量校正额外模型解析、清除旧楼层变量（`clearOldFloors`）。原版把其中 4 个当“老旧功能”藏起来，这里都显示
+  - 增量校正（最后一楼）：可选方向 → 以现在的变量为准请求（任务 `buildRepairTask`，标签 `<variable_repair_task>`，历史里保留原更新块）→ 每次尝试在副本上试算，出错或没变化算失败 → 预览变化（`planRepair`：校正块作为新的 `<UpdateVariable>` 放在原更新块后面，再从上一楼整楼重算）→ 确认后写正文和变量 → 提示条带“撤销”（`toast` 第 4 个参数 `{action}`）。等待期间聊天 / 楼层 / 回复版本 / 正文 / 变量变了就作废；撤销前也检查没被再改过
+  - 通知（`mvuNotify*`）：加载成功（打开第一个 MVU 聊天时一次）、初始化成功（新聊天）、更新出错（默认关，和原版一样；“变量更新有 N 处没执行”现在受它控制）、额外模型解析中（请求 / 重试进度）。请求失败的提示不受开关影响
+  - 自动清理（`core/mvu-cleanup.js`，原版 function/cleanup）：`mvuCleanup` 默认开，收到回复后在聊天楼层数是 5 的倍数时清理 `mvuKeepRecent` 楼以前的变量，楼层号是 `mvuSnapshotInterval` 倍数的留作快照（`snapshot: true`）；去掉的只有 `initialized_lorebooks stat_data display_data delta_data schema`，脚本自己存的变量不动。删楼层后 2 秒（`initMvuOps` 里的监听）检查最近 `mvuRestoreRecent` 楼，缺变量就从保留范围之前最近的快照重算补回（`restoreVariables`，只算 AI 回复楼层）
+  - 兼容性 `mvuChatVars`：最新楼层的变量同时抄到 `chat_metadata.variables`（`mirrorToChatVars`）；关着时打开聊天会把聊天变量里这几项去掉（原版 checkAndRemoveChatVariables）
+  - 角色卡覆盖：和原版同一个位置——角色主世界书（绑定的世界书文件，没绑定就是卡里内嵌的 character_book）里一个**关闭的** `[config_override]` 条目，内容是 JSON（`更新方式`、`额外模型解析配置.启用自动请求 / 世界书条目白名单正则 / 世界书条目黑名单正则`、`兼容性.更新到聊天变量`，schema 放最后，未知字段原样保留）。读：`ChatSession.mvuOverride()`，合并后的设置 `mvuSettings()`（`applyOverride`），所有生效判断都用它；写：`mvu-ops.js` 的 `writeOverride`（存世界书或角色卡）。被覆盖的设置旁边有“角色卡覆盖：值”的标记，黑白名单显示“角色卡规则叠加”。原版的 sendas 一项轻酒馆没有对应功能，读写时原样保留
+  - 搜功能清单里每项都加了条目；额外模型解析专属的项给了退路（找不到就定位到“变量更新方式”）
 - `<StatusPlaceHolderImpl/>`：真正的 MVU 脚本会给每条 AI 回复补这个占位符，卡里的正则再把它换成状态栏。现在内置实现也补（`ChatSession.usesStatusPlaceholder()`：卡 / 预设 / 全局正则里有替换它的，或开场白里本来就带着，才补），以前新回复不显示状态栏就是因为缺这个
 
 **脚本用到的第三方库**：`$` 是页面的 jQuery（`vendor/jquery.min.js`，有脚本要跑时才加载）；`z`（zod 4.4.3）和 Vue 3 从 jsdelivr 取（依次试 testingcf / cdn / fastly / gcore 四个镜像），源码里出现 `z.` / `Vue` 才取；图标字体 Font Awesome 同理。酒馆助手自己也是从 jsdelivr 取 Vue 的，脚本本身 import 的东西也都在 jsdelivr，所以这不增加新的依赖点。这台开发机访问不了 npm，所以没有把 zod / Vue 收进 `vendor/`；以后想离线可用可以收进来，改 `ui/scripts.js` 的 `needZod / needVue`。
@@ -157,6 +189,41 @@ docs/HANDOFF.md         本文档
 - `SillyTavern.getContext()` 补了 `loadWorldInfo/saveWorldInfo/setExtensionPrompt/extensionPrompts/isGenerating`，`chatMetadata` 会在聊天头里建好 `chat_metadata` 再给出去（插件写入能随聊天保存，共用模式下和 Luker 看到同一份柚月记忆）。
 - 已验证（本地无头浏览器）：柚月 1.0.8 的 30 个模块全部加载无报错、记忆窗口打开、插件自己的 API（流式/非流式）与借主连接都通、正常发消息不受影响。没测：真实长聊天上的自动总结/填表全过程、向量化全流程、手机触屏布局。
 
+## 3.8 服务器代生成（2026-10-10，页面版本 h22）
+
+起因：iPhone 上的 PWA 切到后台 / 锁屏 / 关掉页面，浏览器里的请求会被掐掉，回复生成一半就没了。思路照 Luker（`src/endpoints/backends/luker-generation.js`、`src/ws-delivery.js`、`src/endpoints/generation-control.js`）：**生成由服务器请求上游，页面只是看**。
+
+**流程**
+1. `generate()` 组好请求体后（脚本的 `GENERATE_AFTER_DATA` / `CHAT_COMPLETION_SETTINGS_READY` 都已经改过），先把刚加的用户消息落盘，再 `POST /api/gen`：`{id, conn, request: {path, method, body, stream}, chat: {char, file, name}, target, preset, started, provider, model, tzOffset}`。`target` = `{type: normal|swipe|continue, index, swipeId?, baseText?, anchor, replace?}`：`anchor` 是写入位置前一条的指纹（谁说的 + 发送时间，`core/reply.js` 的 `messageFingerprint`），`replace` 是“重新生成”时被替换的旧回复的指纹（它还在文件里）。本地占位的 `extra.lt_job` 记着任务号（生成途中聊天被保存过的话，服务器靠它认出占位）
+2. 服务器（`server/gen-jobs.mjs`）起任务去请求上游，按设置重试。**客户端断开不 abort**，只有 `POST /api/gen/:id/abort` 才断开上游。事件带递增 `seq` 存在内存：`delta`（增量 `t` / `r`，攒 40ms 一批）、`reset`（重试，从头再来）、`status`、`done`（全文）、`error`、`cancelled`、`persisting`、`persisted`、`persist_failed`。任务保留 2 小时
+3. 页面 `GET /api/gen/:id/events?after=<已收到的最后一个 seq>`（SSE，每 10 秒一个心跳注释）。断了自动重连只补发后面的，不丢不重；25 秒没收到任何字节就当连接死了重连；`visibilitychange` 回到前台、`online`、`pageshow` 时立即重连（`genjob.js` 的 `kickStreams`）。流结束时一定断开连接（浏览器同站只有 6 个连接，留着不关会把保存请求堵住——踩过）；服务器在任务到头时也主动断开订阅
+4. 收到 `done`：页面先 `POST /claim`（宽限期从现在重新算），收尾期间每 5 秒再认领一次（额外模型解析可能要十几秒），然后照常走前端收尾，**带 `X-LT-Gen-Job` 头保存聊天 = 确认**（`state.js` 的 `saveChatForJob`）。确认和保存是同一个请求，在聊天的写入锁里（`store.withChatLock`）先核对任务状态再写，所以不会出现页面和服务器都写
+5. 宽限期（默认 15 秒，`--gen-grace <毫秒>` 或 `LT_GEN_GRACE_MS`；`/api/ping` 的 `genGraceMs`）内没确认：服务器 `persistReply`（`server/gen-persist.mjs`）自己写进聊天文件，用的是 `public/js/core` 同一套代码：`buildServerSession` 按页面规则读设置、角色卡、预设、用户设定、相关世界书（`core/reply.js` 的 `relevantWorldNames` / `personaOf`，页面的 `loadRelevantWorlds` / `activePersona` 也改用它们）→ `locateReply` 找位置 → `placeLocated` 放占位 → 拆思维链（`separateReasoning`）→ `finalizeReply`（永久正则、正文、时间按页面时区、extra、swipe）→ 额外模型解析（`core/mvu-request.js`，同样的开关 / 请求内容模式 / 请求策略 / 高级参数 / 连接选择，角色卡 `[config_override]` 覆盖经 `session.mvuSettings()` 生效）→ `applyReplyVars`（随 AI 输出解析、写进这一楼这个 swipe 的 `variables`、状态栏占位符、同步到聊天变量、自动清理）。写之前在写入锁里核对版本：算的过程中聊天被写过就读最新的，把算好的这一楼放进去
+6. 服务器写的楼层打标记 `extra.lt_server_persisted = {job, type, at, pending: true, mvu, reasoning?, orphan?, warnings?}`（swipe 的话也在那个 swipe 的 `swipe_info[].extra` 里）。页面下次打开这个聊天（`CHAT_CHANGED` 后等脚本对齐好）由 `replayServerReplies` 补发：MVU 开着时发 `mag_variable_update_ended`（参数是这一楼存好的变量和上一楼的变量，监听者原地改了照常保存）和 `_for_zod`，然后 `stream_reasoning_done`（有思维链时）、`MESSAGE_RECEIVED`，前端卡收到 `message_received` / `js_generation_ended` / `mag_variable_update_ended`。**不重新解析变量**。补发后 `pending` 改成 false，标记留着
+7. 找回：打开聊天、回到前台、网络恢复时 `GET /api/gen/active?char=&chat=`（`resumeActiveJobs`）。有生成中 / 等确认 / 服务器写失败的任务：按 `target` 在本地聊天里放好占位，从 seq 0 收流，收齐后照常由页面收尾（刷新页面也能接回来）；服务器正在写：等它写完载入；服务器刚写完而本地是旧的：重新载入。页面带任务号保存时服务器已经写过（或别的窗口已经确认过）返回 409 `gen-persisted`，页面丢掉本地占位、载入服务器那份
+8. 停止：页面断开 SSE 并 `POST /abort`，保留本地已显示的部分（行为和以前一样）；已经收齐的任务被停止时也不再由服务器写。被别的窗口停掉的任务当作停止
+
+**写入位置**（`locateReply`）：先找带任务号的占位；否则核对 `anchor`，normal 要求文件正好 `index` 条（或 `index + 1` 条且最后一条是 `replace`）、swipe 要求那一楼的 swipe 数等于 `swipeId`、continue 要求那一楼的正文还是 `baseText`。对不上（别处删改过楼层）就把回复作为新的一条加到末尾并标 `orphan`，宁可多一条也不丢
+
+**保护**：同一个聊天已有 running / awaiting_ack / persisting 的任务时再开新的回 409 `gen-busy`（页面提示后接过去显示那个任务）；任务号重复回 409。服务器重启丢掉内存里的任务：页面的流 / 认领收到 404，提示“服务器上找不到这次生成了”，已经显示的部分按停止处理保留，没有内容就回滚占位
+
+**部署时**：nginx 不用改——`/api/gen/` 走 `location /`，那里已经 `proxy_buffering off`、读超时 600 秒（心跳 10 秒一次），`text/event-stream` 不在 gzip 列表里；服务端也带了 `X-Accel-Buffering: no`。宽限期要改就在 systemd 单元的启动参数加 `--gen-grace`。任务在内存里，`systemctl restart` 会丢掉进行中的任务（页面会提示并保留已显示的部分）
+
+**和 Luker 的差别**
+- 推送用 SSE 不用 WebSocket：只有服务器往页面推，SSE 自带重连语义，nginx 的 `/api/` 已按流式配置；seq 续传、心跳和 Luker 的 ws-delivery 一样
+- 确认 = 带任务号的那次保存（同一个请求、同一把写入锁），Luker 是保存后另外确认 / 按聊天找任务确认
+- 收尾期间页面会续期（认领心跳），宽限期从“最后一次认领”算；Luker 是从完成时算的固定 15 秒
+- Luker 代写只写正文；这里连永久正则、思维链拆分、MVU 变量（含额外模型解析）一起在服务器算好，并标记让页面补发脚本事件
+- 找回接口：Luker `GET /api/generation/active?avatar_url&file_name`，这里 `GET /api/gen/active?char&chat`；显式取消 `POST /api/gen/:id/abort`（Luker `/api/generation/:id/abort`）
+
+**服务器上跑不了的**（只在浏览器里才有的东西，服务器代写时缺）
+- 酒馆助手脚本和前端卡本身：事件只能事后补发。监听 MVU 过程事件的脚本（`mag_command_parsed`、`_for_zod` 的命令校验，即变量结构 / zod 脚本）在服务器代写时不参与：**不合结构的命令不会被拒**，`display_data` / `delta_data` 会先留着，补发 `mag_variable_update_ended_for_zod` 时由结构脚本去掉
+- 脚本在 `mag_before_message_update` 里改正文、在 `MESSAGE_RECEIVED` 里改楼层：补发时才发生（变量不重算）
+- 额外模型解析的请求里：脚本 `injectPrompts` 注入的提示词、`registerMacroLike` 的助手宏、`CHAT_COMPLETION_SETTINGS_READY` 对变量更新请求的修改，服务器上都没有（正文请求是页面组好的，不受影响）
+- 提示词模板（EJS）里 `SillyTavern.getContext()`、`toastr` 在服务器上没有（给了 lodash 的 `_`）；用到它们的世界书条目在额外模型解析的请求里会求值失败、按原文处理
+- 代我写、静默生成、脚本自己的 `generate` / `generateRaw` 不写聊天，仍由浏览器直接请求（切后台会断）
+- 同一个聊天在两个窗口都开着时，两个窗口都会接着显示并各自收尾（额外模型解析会请求两次），先保存的算数，后保存的载入它
+
 ## 4. 数据与兼容约定
 
 - 数据目录结构与酒馆对应：`characters/*.png`、`chats/<角色>/*.jsonl`、`presets/*.json`、`worlds/*.json`、`avatars/`；另有 `settings.json`、`secrets.json`、`backups/`、`trash/`
@@ -167,10 +234,12 @@ docs/HANDOFF.md         本文档
 
 ## 5. 当前状态（已验证的部分）
 
-- `npm test`：21 项核心单元测试全过（宏、正则、世界书、EJS、MVU、变量、提示词组装、接口格式、PNG/JSONL 往返、前端卡识别、缩略图、设置面板结构与搜索清单；脚本库的规范化与起停判断、MVU 事件流程与不发事件的路径结果一致、状态栏占位符、酒馆助手数据格式来回转换、导入角色卡时世界书和脚本的去向）
+- 2026-10-10 服务器代生成（h22）：单测 45/45（新增 `test/gen-jobs.test.mjs` 7 项）；端到端 42/42（新增 6 项：页面在线时由页面收尾、断网后按 seq 续传不丢不重字、生成中关掉页面后服务器写完回复和随 AI 输出的变量并在重开后补发事件、页面在线 / 停止时服务器不再写、额外模型解析的变量由服务器算好、刷新页面后接回生成中的任务；“中途停止”还检查了上游确实被断开）。端到端里关页面的两项要等宽限期，各约 28 秒。**只在本地测过，没有部署到 117**；真机 iPhone 后台 / 锁屏没试过
+
+- `npm test`：38 项（含 `test/mvu-extra.test.mjs` 变量单独更新、`test/mvu-panel.test.mjs` 黑白名单正则 / 世界书筛选 / 请求组装 / 请求策略 / 自动清理与恢复 / 增量校正合并 / 角色卡覆盖）。原 21 项核心单元测试全过（宏、正则、世界书、EJS、MVU、变量、提示词组装、接口格式、PNG/JSONL 往返、前端卡识别、缩略图、设置面板结构与搜索清单；脚本库的规范化与起停判断、MVU 事件流程与不发事件的路径结果一致、状态栏占位符、酒馆助手数据格式来回转换、导入角色卡时世界书和脚本的去向）
 - 2026-10-10 共用模式：单测 24/24、端到端 31/31（含共用导入、聊天冲突三种选法、预设冲突、旧页面拦截）；Luker 真实数据只读体检通过（角色卡 25、世界书 33、预设 6、聊天 22 存回去不丢字段）。**Luker 界面里的冲突提示没在真界面演练过**
 - 跑端到端：沙箱 / 有 HTTP 代理的环境要设 `NO_PROXY=127.0.0.1,localhost`（否则 `mock()` 的 urllib 走代理 404）；下载不了 Playwright 的 Chromium 时设 `LT_CHROMIUM=/usr/bin/chromium` 用系统浏览器
-- 端到端（无头 Chromium + 假模型）26/26 通过，含“中途停止”、设置面板 4 组 12 区逐个打开、搜索清单逐项定位、各菜单的条目、手机上顶栏文字和预设切换；脚本 5 项：导入带脚本的卡后世界书 / 正则 / 脚本自动就位并运行、MVU 事件和变量结构、脚本按钮与脚本变量、脚本自己调模型、面板开关与停掉后的清理、换角色 / 换预设跟着起停、预设脚本改请求和注入提示词、脚本的设置界面、刷新后恢复。注意每次跑前要重启 `mock-llm.mjs`：429 / 错误正文用例是“每个进程只触发一次”，复用旧进程会误报“没有重试”
+- 端到端（无头 Chromium + 假模型）连共用实例 36/36 通过（2026-10-10 第二轮新增 4 项：请求策略失败后重试与通知开关、关掉自动请求后手动重试、增量校正的预览 / 应用 / 撤销、角色卡覆盖存进世界书；“变量单独更新”那项还检查了设置卡片的顺序和内置请求内容的顺序，并截 `/tmp/lt-shots/vars-mvu-ai.png`、`vars-mvu-extra.png`。假模型按请求里的 `variable_update_task` / `variable_repair_task` 认出变量更新请求，关键字 NOSCHEMA / BADONCE 见 `tools/mock-llm.mjs`）。沙箱里新版 playwright 浏览器下不下来时用 `pip install playwright==1.47.0` 再 `playwright install chromium`。共用实例的 `LT_SHARED_OWN` 必须就是它的 `--data` 目录，否则备份用例会误报。原来 26/26，含“中途停止”、设置面板 4 组 12 区逐个打开、搜索清单逐项定位、各菜单的条目、手机上顶栏文字和预设切换；脚本 5 项：导入带脚本的卡后世界书 / 正则 / 脚本自动就位并运行、MVU 事件和变量结构、脚本按钮与脚本变量、脚本自己调模型、面板开关与停掉后的清理、换角色 / 换预设跟着起停、预设脚本改请求和注入提示词、脚本的设置界面、刷新后恢复。注意每次跑前要重启 `mock-llm.mjs`：429 / 错误正文用例是“每个进程只触发一次”，复用旧进程会误报“没有重试”
 - 端到端不需要外网：zod 和 `mvu_zod.js` 用 `tools/e2e.py` 里的替身顶上，jsdelivr 的其余请求直接掐掉。真库的行为要在能联网的地方另外验证（见下面 2026-10-10 的脚本实测）
 - 2026-10-10 用 117 服务器上 Luker 的真实数据实测（导入 25 角色 / 22 聊天 / 6 预设 / 33 世界书 / 10 正则，0 错误）：
   - 角色库 25 张卡缩略图共约 1.7 MB（原图合计约 82 MB，最大一张 15.9 MB → 61 KB），每张首次生成 50–250 ms
@@ -198,13 +267,13 @@ docs/HANDOFF.md         本文档
 - 真实 API 只测过一家 OpenAI 兼容中转（Gemini 模型）；Claude / Gemini 原生格式仍只用假模型测过
 - 界面的编辑类面板（预设提示词编辑、世界书条目编辑、正则编辑器、角色编辑、用户设定、导入面板的界面流程）只做过静态检查，没有端到端覆盖
 - 不支持：群聊、文本补全（Text Completion）接口、任意第三方酒馆扩展（Persona Weaver、故事神谕、小白X 的任务等，包括卡里 `extensions` 下它们各自存的数据）
-- 酒馆助手脚本的边界：
-  - 只有角色卡和预设自带的脚本，没有“全局脚本库”（`getScriptTrees({type: 'global'})` 返回空）
-  - 页面结构只对齐了 3.5 节列的那几个选择器。脚本去找酒馆页面上别的东西（`#top-bar`、`#completion_prompt_manager`、扩展菜单里的具体按钮、酒馆的弹窗 DOM）会找不到；一般表现为那部分功能没反应，不影响别的
-  - 没实现：音频接口、旧版 lorebook 接口（`getLorebookEntries` 一族）、扩展管理、`importRaw*`、`getModelList`、`generate` 的 `tools` / `json_schema` / 图片输入。`registerMacroLike` 只登记不生效
-  - 酒馆的事件只发其中一部分（消息增删改、生成开始 / 结束 / 停止、聊天切换、预设切换、渲染完成、`CHAT_COMPLETION_PROMPT_READY`、`CHAT_COMPLETION_SETTINGS_READY`、`GENERATION_AFTER_COMMANDS`、`GENERATE_AFTER_DATA`、`WORLD_INFO_ACTIVATED`、流式 token）；监听别的事件不报错，只是不会触发
+- 酒馆助手脚本的边界（2026-10-10 补齐后）：
+  - 已有：全局脚本库（存在 `settings.scripts.global`，设置 › 角色 › 脚本 里导入 / 开关 / 删除；导入的默认关着）、音频（`ui/audio.js`，播放列表和设置存在 `settings.audio`，手机被拦时下次点屏幕再放）、助手宏 `registerMacroLike`（提示词发出前和楼层显示时替换）、`getModelList` / `getProxyPresetNames`（代理预设 = 连接）、`generate` 的 `image` / `tools` / `tool_choice` / `json_schema` / `custom_api.proxy_preset`（三家接口各自换算，见 `core/providers.js` 的 `add*Extras`；用到工具或结构化输出时不走流式）、旧版世界书 `getLorebook*` 一族（字段换算照酒馆助手源码）、用户设定 `getPersona*` 一族、`createCharacter / createOrReplaceCharacter / deleteCharacter`、`importRaw*`、扩展管理（服务端 `/api/extensions/install|update|delete|version` 用 git，插件目录只读时报 403）。这一批在 `ui/script-api-more.js`
+  - 前端卡 iframe 里的接口是子集，其余能跨窗口复制参数的接口经 `rpc('helper', 名字, 参数)` 转给页面上的完整实现（返回 Promise）；要传函数的（`xxxWith`、`registerMacroLike`）在前端卡里没有
+  - 事件：在原来那些之外补发 `settings_updated`、`chatcompletion_model_changed`、`chatcompletion_source_changed`、`connection_profile_loaded`、`online_status_changed`、`oai_preset_changed_before/after`、`preset_renamed(_before)`、`preset_deleted`、`chat_deleted`、`characterDeleted`、`impersonate_ready`、`message_swipe_deleted`、`character_first_message_selected`、`generate_before/after_combine_prompts`、`worldinfo_scan_done`、`stream_reasoning_done`、`character_page_loaded`、`worldinfo_settings_updated`；脚本发 `worldinfo_force_activate` 会让下一次生成强制激活那些条目。仍不发的：图片 / 生图 / 工具调用渲染 / 密钥 / 群聊 / 设置载入（脚本启动前就过了，和酒馆一样）这类轻酒馆没有对应功能的
+  - 斜杠命令补了：音频 6 个、`impersonate stop abort return flushvar flushglobalvar listvar len upper lower trim tokens add sub mul div mod pow max min abs round floor ceil rand input popup confirm buttons delay inject listinjects flushinject model preset go/char persona getchatname closechat bg addswipe delswipe getentryfield setentryfield findentry createentry`。没有：带 `{: :}` 闭包的流程控制（`if`、`while`、`times`、`run`）、快速回复
+  - 页面结构只对齐了 3.5 节列的那几个选择器。脚本去找酒馆页面上别的东西（`#top-bar`、`#completion_prompt_manager`、酒馆的弹窗 DOM）会找不到；一般表现为那部分功能没反应，不影响别的
   - `generate` 的 `overrides` 只支持角色描述 / 性格 / 场景 / 用户设定 / 示例对话 / `chat_history.prompts`，世界书的两个覆盖只在 `generateRaw` 里生效
-  - 斜杠命令仍是子集
 - 提示词模板（EJS）实现了常用 API，冷门函数可能缺
 - token 数是估算（没有真实分词器）
 - 前端卡 iframe 是无同源沙箱（origin 为 null），卡里直接 fetch 第三方图床（如某张卡用的 r2.dev）会被对方的 CORS 拦掉

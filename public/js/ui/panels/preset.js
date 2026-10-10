@@ -1,6 +1,6 @@
 // 预设面板：切换/导入/导出、采样参数、提示词管理器（拖拽排序、开关、编辑）、格式与杂项
 import { h, clear, icon, iconBtn, toast, confirmDialog, promptDialog, modal, pickFiles, downloadText, makeSortable } from '../dom.js';
-import { state, savePreset, refreshLists, flushPending } from '../../state.js';
+import { state, savePreset, refreshLists, flushPending, eventSource } from '../../state.js';
 import { api } from '../../api.js';
 import { setPreset, refresh } from '../../controller.js';
 import { getPromptOrder, newCustomPrompt, BUILTIN_PROMPT_NAMES, MARKERS, PROMPT_ORDER_GLOBAL, presetTavernHelperScripts, normalizePreset } from '../../core/preset.js';
@@ -260,7 +260,9 @@ async function onRename() {
     if (!name?.trim() || name.trim() === old) return;
     try {
         await flushPending();
+        await eventSource.emit('preset_renamed_before', { apiId: 'openai', oldName: old, newName: name.trim() });
         await api.rename('presets', old, name.trim());
+        eventSource.emit('preset_renamed', { apiId: 'openai', oldName: old, newName: name.trim() });
         await refreshLists();
         state.preset.name = name.trim();
         state.settings.activePreset = name.trim();
@@ -276,6 +278,7 @@ async function onDelete() {
     if (!await confirmDialog(`删除预设「${name}」？（会移到 trash）`, { danger: true, okLabel: '删除' })) return;
     await flushPending();
     await api.remove('presets', name);
+    eventSource.emit('preset_deleted', { apiId: 'openai', name });
     await refreshLists();
     await setPreset(state.presetList[0].name);
     refresh(['panels', 'topbar']);

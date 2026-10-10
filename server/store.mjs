@@ -8,6 +8,7 @@ import { readCardJson, writeCardPng, isPng, extractChunks } from '../public/js/c
 import { normalizeCard, toExportCard } from '../public/js/core/card.js';
 import { characterBookToWorld, normalizeWorld } from '../public/js/core/worldinfo.js';
 import { HttpError } from './http.mjs';
+import { applyJsonOps } from '../public/js/core/jsondiff.js';
 import { makeThumbnail } from './thumb.mjs';
 
 export const DIRS = ['characters', 'chats', 'presets', 'worlds', 'avatars', 'backups', 'trash', 'extensions', 'files'];
@@ -56,6 +57,21 @@ export class Store {
         this.cardMeta = new Map(); // file → {mtime, meta}
         this.lastBackup = new Map();
         this.thumbJobs = new Map(); // 同一张缩略图并发请求只生成一次
+        this.chatLocks = new Map(); // 同一个聊天的写入排队（见 withChatLock）
+    }
+
+    /**
+     * 同一个聊天的写入排成一队：页面保存和服务器代写回复都是“先核对版本再写”，中间不能插进另一次写，
+     * 否则两边都核对通过、后写的把先写的盖掉。fn 返回的结果原样返回。
+     */
+    withChatLock(charId, name, fn) {
+        const key = `${sanitizeName(charId)}/${sanitizeName(name)}`;
+        const prev = this.chatLocks.get(key) ?? Promise.resolve();
+        const run = prev.then(fn, fn);
+        const tail = run.then(() => {}, () => {});
+        this.chatLocks.set(key, tail);
+        tail.then(() => { if (this.chatLocks.get(key) === tail) this.chatLocks.delete(key); });
+        return run;
     }
 
     p(...parts) {
@@ -393,6 +409,32 @@ export class Store {
         // 先写聊天再写标记：万一酒馆正好卡在中间写了一笔，它下一次保存会对不上标记而被拦下来
         if (integrity) await this.rotateSyncSidecar(file, integrity);
         return this.chatVersion(charId, name);
+    }
+
+    /**
+     * 只传改动的行：patch = {baseCount, count, set: {行号: 整行}}。前端拿着上次读/写时的那一版做对比，
+     * 没变的行直接用磁盘上的。磁盘上的行数和前端以为的不一样就拒绝（409 patch-base），前端会改用整份上传。
+     */
+    async patchChat(charId, name, patch, { expect = '' } = {}) {
+        const current = await this.chatVersion(charId, name);
+        if (!current || current !== expect) throw new HttpError(409, '这个聊天在别处被改过了', 'chat-conflict');
+        const lines = (await this.readChat(charId, name)).split(/\r?\n/).filter(l => l.trim());
+        const set = patch?.set && typeof patch.set === 'object' ? patch.set : {};
+        const count = Number(patch?.count);
+        if (lines.length !== Number(patch?.baseCount) || !Number.isInteger(count) || count < 1) throw new HttpError(409, '底稿对不上', 'patch-base');
+        const edit = patch?.edit && typeof patch.edit === 'object' ? patch.edit : {};
+        const out = [];
+        for (let i = 0; i < count; i++) {
+            let line = Object.prototype.hasOwnProperty.call(set, i) ? set[i] : lines[i];
+            // 按字段改：只带了改过的字段，在磁盘上那一行的基础上改
+            if (Object.prototype.hasOwnProperty.call(edit, i) && typeof line === 'string') {
+                try { line = JSON.stringify(applyJsonOps(JSON.parse(line), edit[i])); } catch { throw new HttpError(409, '底稿对不上', 'patch-base'); }
+            }
+            if (typeof line !== 'string' || line.includes('\n')) throw new HttpError(409, '底稿对不上', 'patch-base');
+            out.push(line);
+        }
+        try { JSON.parse(out[0]); } catch { throw new HttpError(400, '聊天格式不对'); }
+        return this.saveChat(charId, name, out.join('\n') + '\n', { expect });
     }
 
     /** Luker 把聊天的校验标记另存在旁边的文件里，并且以它为准；这个文件在才更新（原版酒馆只看聊天第一行） */

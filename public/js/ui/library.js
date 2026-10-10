@@ -53,17 +53,25 @@ export function renderHome(el) {
         homeTab === 'library' ? h('div', { class: 'home-tab-actions' },
             h('button', { class: 'btn', title: '导入角色卡', onclick: onImport }, icon('upload'), h('span', { class: 'bt-label' }, '导入')),
             h('button', { class: 'btn primary', title: '新建角色', onclick: onCreate }, icon('plus'), h('span', { class: 'bt-label' }, '新建'))) : null));
-    wrap.append(homeTab === 'library' ? library() : recentChats());
+    if (homeTab === 'library') wrap.append(library());
+    else wrap.append(recentChats(), charShelf());
     el.append(wrap);
 }
+
+const RECENT_SHOW = 8;
+let recentExpanded = false;
 
 function recentChats() {
     const box = h('div', { class: 'recent-list' });
     const draw = (list) => {
         clear(box);
         if (!list) { box.append(h('div', { class: 'empty' }, '正在读取…')); return; }
-        if (!list.length) { box.append(h('div', { class: 'empty' }, '还没有聊天。去「角色库」选一个角色开始吧')); return; }
-        for (const c of list) box.append(recentItem(c));
+        if (!list.length) { box.append(h('div', { class: 'empty' }, '还没有聊天，点下面的角色开始吧')); return; }
+        const shown = recentExpanded ? list : list.slice(0, RECENT_SHOW);
+        for (const c of shown) box.append(recentItem(c));
+        if (list.length > shown.length) {
+            box.append(h('button', { class: 'recent-more', onclick: () => { recentExpanded = true; draw(list); } }, `再看 ${list.length - shown.length} 个`));
+        }
     };
     draw(recentCache);
     api.recentChats(50).then((list) => {
@@ -73,35 +81,56 @@ function recentChats() {
     return box;
 }
 
+/** 最近聊天下面：全部角色的头像墙，点一下进这个角色最近的聊天 */
+function charShelf() {
+    const items = [...state.characters].filter(c => !c.error).sort(SORTS.recent);
+    return h('div', { class: 'char-shelf' },
+        h('div', { class: 'shelf-head' },
+            h('span', { class: 'grow' }, `我的角色 · ${items.length}`),
+            h('button', { class: 'section-link', onclick: onImport }, '导入'),
+            h('button', { class: 'section-link', onclick: onCreate }, '新建'),
+            h('button', { class: 'section-link', onclick: () => { homeTab = 'library'; refresh(['chat']); } }, '管理 ›')),
+        h('div', { class: 'shelf-grid' }, ...items.map(c => h('button', {
+            class: 'shelf-item',
+            title: c.name,
+            onclick: () => open(c),
+            oncontextmenu: (e) => { e.preventDefault(); charMenu(e.currentTarget, c); },
+        }, charAvatar(c.file, 'avatar', { name: c.name }), h('span', {}, c.name)))));
+}
+
 function recentItem(c) {
     const current = state.char?.file === c.file && state.chat?.name === c.chat;
-    const meta = [chatTitle(c.chat, c.charName), c.count > 0 ? `${c.count} 楼` : ''].filter(Boolean).join(' · ');
+    const right = [c.count > 0 ? `${c.count} 楼` : '', formatTime(c.mtime)].filter(Boolean).join(' · ');
     return h('button', {
         class: `recent-item ${current ? 'active' : ''}`,
-        title: `${c.charName} · ${c.chat}`,
-        onclick: () => openRecent(c),
+        title: `${c.charName} · ${chatTitle(c.chat, c.charName)}`,
+        onclick: (e) => openRecent(c, e.currentTarget),
     },
     charAvatar(c.file, 'avatar', { name: c.charName }),
     h('div', { class: 'ri-body' },
         h('div', { class: 'ri-top' },
             h('span', { class: 'ri-name' }, c.charName),
-            h('span', { class: 'ri-time' }, formatTime(c.mtime))),
-        h('div', { class: 'ri-last' }, c.last ? plainSnippet(c.last, 120) : '（空）'),
-        h('div', { class: 'ri-meta' }, meta)));
+            h('span', { class: 'ri-time' }, right)),
+        h('div', { class: 'ri-last' }, c.last ? plainSnippet(c.last, 120) : '（空）')));
 }
 
-async function openRecent(c) {
+async function openRecent(c, btn) {
+    if (btn?.classList.contains('loading')) return;
+    btn?.classList.add('loading');
     try {
         if (state.char?.file === c.file && state.chat?.name === c.chat) {
             state.view = 'chat';
             refresh(['chat', 'topbar', 'sidebar']);
             return;
         }
-        if (state.char?.file !== c.file) await selectCharacter(c.file, { openLatest: false });
+        api.prefetchChat(c.file.replace(/\.(png|json)$/i, ''), c.chat);
+        if (state.char?.file !== c.file) await selectCharacter(c.file, { openLatest: false, stay: true });
         if (state.char?.file !== c.file) return; // 正在生成之类的原因没切过去
         await openChat(c.chat);
     } catch (e) {
         toast(`打开聊天失败：${e.message}`, 'error');
+    } finally {
+        btn?.classList.remove('loading');
     }
 }
 

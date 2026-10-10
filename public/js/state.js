@@ -5,8 +5,11 @@ import { DEFAULT_WI_SETTINGS, normalizeWorld } from './core/worldinfo.js';
 import { normalizePreset, DEFAULT_PRESET } from './core/preset.js';
 import { debounce, clone, uuid } from './core/util.js';
 import { serializeChat } from './core/chat.js';
+import { diffJson } from './core/jsondiff.js';
 import { toast } from './ui/dom.js';
 import { MVU_EVENTS } from './core/mvu.js';
+import { DEFAULT_RETRY } from './core/llm.js';
+import { activeConnectionOf, personaOf } from './core/reply.js';
 
 export const event_types = {
     APP_READY: 'app_ready',
@@ -92,7 +95,7 @@ export function mvuEmitter() {
 export const DEFAULT_SETTINGS = {
     version: 1,
     theme: 'auto', // auto 跟随系统
-    ui: { leftOpen: true, rightOpen: true, rightTab: 'connection', fontSize: 16, chatWidth: 780, enterToSend: true, showReasoning: true, showMesId: false, renderFrontend: true, chatWindow: 80 },
+    ui: { leftOpen: true, rightOpen: true, rightTab: 'connection', fontSize: 16, chatWidth: 780, enterToSend: true, showReasoning: true, showMesId: false, renderFrontend: true, chatWindow: 80, startOnHome: true },
     connections: [],
     activeConnection: '',
     activePreset: '',
@@ -102,7 +105,7 @@ export const DEFAULT_SETTINGS = {
     worldInfo: { ...DEFAULT_WI_SETTINGS, globalSelect: [], charLore: {} },
     regex: [],
     variables: { global: {} },
-    retry: { enabled: true, maxRetries: 2, delayMs: 2000, onEmpty: true, errorPatterns: 'failed with status (429|5\\d\\d)\nrate limit exceeded' },
+    retry: { ...DEFAULT_RETRY },
     authorsNoteScan: false,
     lastChat: null,
     extensions: {},
@@ -135,16 +138,37 @@ export function withDefaults(s) {
     out.retry = { ...DEFAULT_SETTINGS.retry, ...(s?.retry ?? {}) };
     out.variables = { global: {}, ...(s?.variables ?? {}) };
     if (!out.variables.global) out.variables.global = {};
-    out.scripts = { enabled: s?.scripts?.enabled !== false, characters: { ...(s?.scripts?.characters ?? {}) }, presets: { ...(s?.scripts?.presets ?? {}) } };
+    out.scripts = {
+        enabled: s?.scripts?.enabled !== false,
+        characters: { ...(s?.scripts?.characters ?? {}) },
+        presets: { ...(s?.scripts?.presets ?? {}) },
+        globalEnabled: s?.scripts?.globalEnabled !== false,
+        global: s?.scripts?.global && typeof s.scripts.global === 'object' ? s.scripts.global : { tavern_helper: { scripts: [], variables: {} } },
+    };
     return out;
 }
 
+let lastConnSig = null;
 const _saveSettings = debounce(async () => {
     try {
         await api.saveSettings(state.settings);
     } catch (e) {
         toast(`设置保存失败：${e.message}`, 'error');
     }
+    // 给脚本的通知：设置变了；换了连接 / 模型时再多发几个（名字和酒馆一致）
+    eventSource.emit(event_types.SETTINGS_UPDATED);
+    const conn = activeConnection();
+    const sig = `${conn?.id ?? ''}\u0000${conn?.model ?? ''}`;
+    if (lastConnSig !== null && sig !== lastConnSig) {
+        const prevId = lastConnSig.split('\u0000')[0];
+        if (prevId !== (conn?.id ?? '')) {
+            eventSource.emit('connection_profile_loaded', conn?.name ?? '');
+            eventSource.emit('chatcompletion_source_changed', conn?.provider === 'claude' ? 'claude' : conn?.provider === 'gemini' ? 'makersuite' : 'openai');
+        }
+        eventSource.emit('chatcompletion_model_changed', conn?.model ?? '');
+        eventSource.emit('online_status_changed', conn ? (conn.model || 'Connected') : 'no_connection');
+    }
+    lastConnSig = sig;
 }, 500);
 
 export function saveSettings({ now = false } = {}) {
@@ -163,22 +187,60 @@ export function onChatConflict(fn) {
  * 把一个聊天写到磁盘。写入排成一队，一次只发一个：每次都要带上一次写完拿到的版本号，
  * 服务端靠它判断磁盘上的内容是不是已经被别处改过。
  * chat.conflict 为真时不再自动写（等用户选“载入最新的”还是“覆盖”），force 强行覆盖。
+ * job：服务器代生成的任务号。带上它保存就是告诉服务器“这次回复页面已经写好了”，服务器不会再替页面写；
+ * 服务器已经替页面写了的话这次保存被拒（返回 'gen-persisted'），调用方改为载入服务器那份。
+ * @returns {Promise<'ok'|'conflict'|'gen-persisted'|'error'|'skipped'>}
  */
-export function writeChat(charId, chat, { force = false } = {}) {
+export function writeChat(charId, chat, { force = false, job = '' } = {}) {
     const run = async () => {
-        if (chat.conflict && !force) return;
+        if (chat.conflict && !force) return 'skipped';
         try {
-            const r = await api.saveChat(charId, chat.name, serializeChat(chat.header, chat.messages), { expect: chat.version ?? '', force });
+            const text = serializeChat(chat.header, chat.messages);
+            const lines = text.slice(0, -1).split('\n');
+            let r = null;
+            // 只上传改过的行：通常就是最新一两楼加开头一行，几 KB 而不是整份几 MB
+            if (!force && chat.version && Array.isArray(chat.base)) {
+                const set = {}, edit = {};
+                let bytes = 0;
+                for (let i = 0; i < lines.length; i++) {
+                    if (lines[i] === chat.base[i]) continue;
+                    // 改过的楼层只传改过的字段（比如只改了正文或变量），新楼层才传整行
+                    if (i < chat.base.length) {
+                        try {
+                            const ops = diffJson(JSON.parse(chat.base[i]), JSON.parse(lines[i]));
+                            const size = JSON.stringify(ops).length;
+                            if (size < lines[i].length * 0.8) { edit[i] = ops; bytes += size; continue; }
+                        } catch { /* 解析不了就传整行 */ }
+                    }
+                    set[i] = lines[i]; bytes += lines[i].length;
+                }
+                if (bytes < text.length * 0.6) {
+                    try {
+                        r = Object.keys(set).length || Object.keys(edit).length || lines.length !== chat.base.length
+                            ? await api.patchChat(charId, chat.name, { baseCount: chat.base.length, count: lines.length, set, edit }, { expect: chat.version, job })
+                            : (job ? await api.patchChat(charId, chat.name, { baseCount: chat.base.length, count: lines.length, set, edit }, { expect: chat.version, job }) : { version: chat.version });
+                    } catch (e) {
+                        if (e.code === 'chat-conflict' || e.code === 'gen-persisted') throw e;
+                        r = null; // 底稿对不上之类：退回整份上传
+                    }
+                }
+            }
+            if (!r) r = await api.saveChat(charId, chat.name, text, { expect: chat.version ?? '', force, job });
             chat.version = r?.version ?? '';
+            chat.base = lines;
             chat.conflict = false;
+            if (chat.version) api.cacheChat(charId, chat.name, chat.version, text);
+            return 'ok';
         } catch (e) {
+            if (e.code === 'gen-persisted') return 'gen-persisted';
             if (e.code === 'chat-conflict') {
                 chat.conflict = true;
                 if (chatConflictHandler) chatConflictHandler(chat, charId);
                 else toast('这个聊天在别处被改过了，这里的修改没有保存', 'error');
-            } else {
-                toast(`聊天保存失败：${e.message}`, 'error');
+                return 'conflict';
             }
+            toast(`聊天保存失败：${e.message}`, 'error');
+            return 'error';
         }
     };
     chatWrites = chatWrites.then(run, run);
@@ -194,6 +256,19 @@ const _saveChat = debounce(() => {
 export function saveChat({ now = false } = {}) {
     _saveChat();
     if (now) return _saveChat.flush();
+}
+
+/** 服务器代生成的回复由页面收尾后立即保存，带上任务号（见 writeChat） */
+export async function saveChatForJob(job) {
+    _saveChat.cancel();
+    const c = state.chat;
+    if (!c || !state.char) return 'skipped';
+    return writeChat(state.char.id, c, { job });
+}
+
+/** 服务器已经替页面写好了：本地还没发出去的聊天保存作废（马上要载入服务器那份） */
+export function discardPendingChatSave() {
+    _saveChat.cancel();
 }
 
 let fileConflictHandler = null;
@@ -231,8 +306,12 @@ export const savePreset = debounce(async () => {
 export const saveCharacter = debounce(async () => {
     const c = state.char;
     if (!c) return;
+    // 脚本常在打开时把同样的值再写一遍：内容没变就不上传（大卡有好几 MB，手机上传很慢）
+    const body = JSON.stringify(c.card);
+    if (body === c.savedJson) return;
     try {
         await api.saveCharacter(c.file, c.card);
+        c.savedJson = body;
         await eventSource.emit(event_types.CHARACTER_EDITED, c);
     } catch (e) {
         saveFailed(e, '角色卡', {
@@ -240,6 +319,7 @@ export const saveCharacter = debounce(async () => {
             label: `角色卡「${c.card?.data?.name ?? c.id}」`,
             reload: async () => {
                 c.card = await api.getCharacter(c.file);
+                c.savedJson = JSON.stringify(c.card);
                 if (state.char === c) { state.session = null; await eventSource.emit(event_types.CHARACTER_EDITED, c); }
             },
             overwrite: async () => {
@@ -321,15 +401,13 @@ export async function ensurePreset() {
     return state.preset;
 }
 
+// 当前连接 / 用户设定的规则在 core/reply.js（服务器替页面写回复时用同一份）
 export function activeConnection() {
-    const s = state.settings;
-    return s.connections.find(c => c.id === s.activeConnection) ?? s.connections[0] ?? null;
+    return activeConnectionOf(state.settings);
 }
 
 export function activePersona() {
-    const s = state.settings;
-    const p = s.personas.find(x => x.id === s.activePersona) ?? s.personas[0];
-    return p ?? { id: '', name: 'User', description: '' };
+    return personaOf(state.settings);
 }
 
 export function newConnection(partial = {}) {

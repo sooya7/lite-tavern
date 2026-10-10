@@ -1,5 +1,6 @@
 // 启动：读设置 → 绑界面 → 恢复上次的聊天；前端卡的写接口、斜杠命令子集也在这里接上
 import { state, withDefaults, refreshLists, ensurePreset, eventSource, event_types, saveSettings } from './state.js';
+import { initMvuOps } from './mvu-ops.js';
 import { api } from './api.js';
 import { bindUI, selectCharacter, openChat, newChat, getSession, refresh } from './controller.js';
 import { bindGenerateUI, generateQuiet, scriptGenerate, stopGeneration } from './generate.js';
@@ -140,6 +141,8 @@ async function boot() {
         });
     }, { once: true });
 
+    // MVU：打开聊天时的通知 / 聊天变量整理，删楼层后恢复变量（要在恢复上次的聊天之前接上）
+    initMvuOps();
     bindUI({ sidebar: renderSidebar, chat: renderChat, topbar: renderTopbar, panels: renderPanels, appendMessage, renderMessage, renderChat });
     bindGenerateUI({
         openPanel: (tab) => window.dispatchEvent(new CustomEvent('lt:open-panel', { detail: tab })),
@@ -168,18 +171,22 @@ async function boot() {
     renderPanels();
     renderChat();
 
+    // 和酒馆一样，打开先看最近聊天，不预先载入上次的聊天（点哪条才载哪条）
+    const stay = state.settings.ui.startOnHome !== false && state.characters.length > 0;
+    if (stay) state.view = 'home';
     const last = state.settings.lastChat;
-    if (last && state.characters.some(c => c.file === last.file)) {
+    if (!stay && last && state.characters.some(c => c.file === last.file)) {
         try {
-            await selectCharacter(last.file, { openLatest: false });
-            if (state.chatList.some(c => c.name === last.chat)) await openChat(last.chat);
-            else if (state.chatList.length) await openChat(state.chatList[0].name);
+            await selectCharacter(last.file, { openLatest: false, stay });
+            if (state.chatList.some(c => c.name === last.chat)) await openChat(last.chat, { stay });
+            else if (state.chatList.length) await openChat(state.chatList[0].name, { stay });
             else await newChat();
         } catch (e) {
             console.error(e);
             toast(`恢复上次的聊天失败：${e.message}`, 'error');
         }
     }
+    if (stay) state.view = 'home';
     refresh();
     // 酒馆第三方插件（设置 › 酒馆插件 里打开的）：后台加载，不挡界面
     loadEnabledExtensions();
@@ -206,7 +213,8 @@ async function boot() {
         }
     });
     window.addEventListener('beforeunload', (e) => {
-        if (state.generating) { e.preventDefault(); e.returnValue = ''; }
+        // 服务器代生成时离开页面不要紧（回来会接上），只有浏览器自己在请求时才拦一下
+        if (state.generating && !state.server?.genJobs) { e.preventDefault(); e.returnValue = ''; }
     });
     // 切走页面时把没保存的写掉
     document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') import('./state.js').then(m => m.flushPending()); });

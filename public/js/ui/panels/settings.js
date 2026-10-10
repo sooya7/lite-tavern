@@ -44,6 +44,7 @@ export function render(body) {
         field('主题', select(s, 'theme', [{ value: 'auto', label: '跟随系统' }, { value: 'light', label: '浅色' }, { value: 'dark', label: '深色' }], { onChange: () => { applyAppearance(); saveSettings({ now: true }); } })),
         field('正文字号', rangeRow(ui, 'fontSize', { min: 12, max: 24, step: 0.5, onChange: look })),
         field('聊天区宽度（px）', rangeRow(ui, 'chatWidth', { min: 560, max: 1600, step: 20, onChange: look })),
+        checkbox(ui, 'startOnHome', '打开时先显示首页（最近聊天），不直接进上次的聊天', { onChange: save }),
         checkbox(ui, 'showReasoning', '显示思维链（可折叠）', { onChange: rerender }),
         checkbox(ui, 'showMesId', '显示楼层号', { onChange: rerender }),
         field('聊天页只显示最近几楼', numberInput(ui, 'chatWindow', { min: 0, max: 9999, onChange: rerender, placeholder: '80' }), '只影响显示，不影响发给 AI 的内容；更早的点顶部按钮再加载。0 = 全部显示'),

@@ -3,11 +3,11 @@
 //
 // 和消息里的前端界面（ui/frontend.js，无同源沙箱）不同，脚本要直接操作页面（悬浮窗、小手机、改楼层显示），
 // 所以和酒馆助手一样跑在同源 iframe 里：脚本能读写这里的全部数据、用配置好的模型连接。开关见 设置 › 角色 › 脚本。
-import { state, eventSource, event_types, saveChat, saveCharacter, savePreset } from '../state.js';
+import { state, eventSource, event_types, saveChat, saveCharacter, savePreset, saveSettings } from '../state.js';
 import { getSession } from '../controller.js';
 import { activeScripts, flattenScriptTrees, scriptTreesOf, rewriteScriptSource, buttonEventName } from '../core/scripts.js';
 import { MVU_EVENTS } from '../core/mvu.js';
-import { createScriptApi, installHostGlobals, registerScriptWindow, unregisterScriptWindow, dropGlobalsOf, dropInjectionsOf,
+import { createScriptApi, installHostGlobals, registerScriptWindow, unregisterScriptWindow, dropGlobalsOf, dropInjectionsOf, dropMacroLikesOf, applyMacroLikesToMessages,
     applyInjections, expireInjections, toastr, YAML, findScriptRaw, setScriptHost } from './script-api.js';
 import { renderMessage } from './chat.js';
 import { refreshSnapshots } from './frontend.js';
@@ -316,6 +316,7 @@ function stop(rt) {
     sweep(rt);
     dropGlobalsOf(rt);
     dropInjectionsOf(rt);
+    dropMacroLikesOf(rt);
     for (const u of rt.urls) URL.revokeObjectURL(u);
     const st = lastStatus.get(rt.id);
     if (st && st.state !== 'error') lastStatus.set(rt.id, { ...st, state: 'stopped' });
@@ -467,7 +468,14 @@ export function initScripts({ bindGenerate } = {}) {
     helperIndex = h('div', { id: 'tavern_helper' });
     holder = h('div', { id: 'lt-script-holder', hidden: true }, HOLDER_IDS.map(id => h('div', { id, class: 'st-ext-area' })), helperIndex);
     document.body.append(frames, holder);
-    bindGenerate?.({ beforePrompt: applyInjections, afterGeneration: expireInjections });
+    bindGenerate?.({ beforePrompt: applyInjections, afterGeneration: expireInjections, transformPrompt: applyMacroLikesToMessages, scriptsSettled: () => queue });
+
+    // 脚本发 WORLDINFO_FORCE_ACTIVATE（[{world, uid}, …]）：下一次生成时强制激活这些世界书条目
+    eventSource.on('worldinfo_force_activate', (entries) => {
+        const forced = getSession()?.templateState?.forced;
+        if (!forced) return;
+        for (const e of Array.isArray(entries) ? entries : [entries]) if (e && e.world !== undefined && e.uid !== undefined) forced.add(`${e.world}.${e.uid}`);
+    });
 
     for (const ev of [event_types.CHAT_CHANGED, event_types.CHARACTER_SELECTED, event_types.PRESET_CHANGED, event_types.CHARACTER_EDITED]) {
         eventSource.on(ev, () => { syncScripts().then(notifyInitToAll); });
@@ -477,6 +485,6 @@ export function initScripts({ bindGenerate } = {}) {
 
 /** 面板改了开关之后调用：写回卡 / 预设并重新对齐 */
 export function scriptToggled(source) {
-    if (source === 'preset') savePreset(); else if (source === 'character') saveCharacter();
+    if (source === 'preset') savePreset(); else if (source === 'character') saveCharacter(); else if (source === 'global') saveSettings();
     return syncScripts();
 }

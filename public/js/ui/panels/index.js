@@ -105,6 +105,9 @@ function bindSearch() {
 }
 
 /** 跳到某项功能：切到它的分区，展开折叠块、滚过去并闪一下；面板外的动作直接执行 */
+/** 分区里的小标签（比如 变量 › 查看变量 / MVU 设置），搜索跳转时先切过去 */
+export const subTabs = {};
+
 export function openFeature(f) {
     if (f.action) {
         // 面板是盖在聊天上的抽屉时先收起来，不然看不到动作的结果
@@ -113,6 +116,7 @@ export function openFeature(f) {
         return;
     }
     scrollMemo[f.tab] = 0;
+    if (f.sub) subTabs[f.tab] = f.sub;
     selectTab(f.tab);
     if (!f.find) return;
     const tryReveal = (left) => {

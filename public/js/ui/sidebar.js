@@ -1,7 +1,7 @@
 // 左栏：新聊天 / 角色库入口、最近角色、当前角色的聊天记录、底部用户设定。
 // 这里只放“去哪儿”：导入和新建角色在角色库页，其余设置都在右侧设置面板（每个功能只留一个入口）。
 import { h, $, clear, icon, iconBtn, toast, confirmDialog, promptDialog, popupMenu, pickFiles, formatTime, downloadText, brandMark } from './dom.js';
-import { state, saveSettings, refreshLists, activePersona } from '../state.js';
+import { state, saveSettings, refreshLists, activePersona, eventSource } from '../state.js';
 import { api } from '../api.js';
 import { selectCharacter, openChat, newChat, reloadCharacters, refresh } from '../controller.js';
 import { importFiles } from './importers.js';
@@ -176,6 +176,7 @@ async function deleteChar(c) {
     const withChats = c.chats ? await confirmDialog(`它有 ${c.chats} 个聊天记录，要一起删掉吗？\n选“取消”会保留聊天文件。`, { okLabel: '一起删', danger: true }) : false;
     try {
         await api.deleteCharacter(c.file, withChats);
+        eventSource.emit('characterDeleted', { id: c.file, character: { name: c.name, avatar: c.file } });
         if (state.char?.file === c.file) {
             state.char = null;
             state.chat = null;
@@ -284,6 +285,7 @@ export async function deleteChat(c) {
     if (!await confirmDialog(`删除聊天「${c.name}」？\n会移到数据目录的 trash 里。`, { danger: true, okLabel: '删除' })) return;
     try {
         await api.deleteChat(state.char.id, c.name);
+        eventSource.emit('chat_deleted', c.name);
         state.chatList = await api.listChats(state.char.id);
         if (state.chat?.name === c.name) {
             state.chat = null;

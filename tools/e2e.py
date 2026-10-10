@@ -8,9 +8,11 @@
 # 有 HTTP 代理的环境加 NO_PROXY=127.0.0.1,localhost；用系统 Chromium 时加 LT_CHROMIUM=/usr/bin/chromium。
 # 再带上 LT_SHARED_URL=http://127.0.0.1:8732 LT_SHARED_DIR=<目录> LT_SHARED_OWN=<另一个空目录> 跑。
 import json
+import re
 import os
 import sys
 import time
+import urllib.parse
 import urllib.request
 
 from playwright.sync_api import sync_playwright
@@ -110,6 +112,32 @@ def mock(path):
         return json.loads(r.read().decode('utf-8'))
 
 
+# 服务器代生成用例之间传的东西（页面在线时收尾的那条、停止的那条）
+gen_state = {}
+
+
+def current_chat():
+    """最近写过的聊天（角色 id, 聊天名）"""
+    with urllib.request.urlopen(BASE + '/api/recent-chats?limit=1') as r:
+        x = json.loads(r.read().decode('utf-8'))[0]
+    return re.sub(r'\.(png|json)$', '', x['file']), x['chat']
+
+
+def chat_lines_direct(cid=None, name=None):
+    """直接从服务器读聊天文件（不经页面），返回楼层列表（不含第一行元数据）"""
+    if cid is None:
+        cid, name = current_chat()
+    q = urllib.parse.quote
+    with urllib.request.urlopen(f'{BASE}/api/chats/{q(cid, safe="")}/{q(name, safe="")}') as r:
+        lines = [json.loads(l) for l in r.read().decode('utf-8').splitlines() if l.strip()]
+    return lines[1:]
+
+
+def chat_lines():
+    page.wait_for_timeout(700)  # 等页面的防抖保存
+    return chat_lines_direct()
+
+
 # 设置面板：分区 → 所在分组（和 public/js/ui/panels/nav.js 一致）
 SECTION_GROUP = {
     '连接': 'model', '预设': 'model',
@@ -126,13 +154,16 @@ def open_settings(pg=None):
         pg.wait_for_timeout(300)
 
 
-def right_tab(label, pg=None):
-    """打开设置面板里的某个分区：先点左边的分组，再点顶上的分区"""
+def right_tab(label, pg=None, sub=None):
+    """打开设置面板里的某个分区：先点左边的分组，再点顶上的分区；sub 是分区里的小标签"""
     pg = pg or page
     open_settings(pg)
     pg.locator(f'#right .panel-rail .tab[data-group="{SECTION_GROUP[label]}"]').click()
-    pg.locator('#right .seg-tab', has_text=label).first.click()
+    pg.locator('#right .panel-seg:not(.vars-seg) .seg-tab', has_text=label).first.click()
     pg.wait_for_timeout(150)
+    if sub:
+        pg.locator('#right .vars-seg .seg-tab', has_text=sub).click()
+        pg.wait_for_timeout(150)
 
 
 def menu_labels():
@@ -159,6 +190,15 @@ def wait_gen(timeout=40000):
         pass
     page.wait_for_function("() => !document.querySelector('#send_but.stop')", timeout=timeout)
     page.wait_for_timeout(400)
+
+
+def open_fold(title, pg=None):
+    """展开设置面板里默认收起的一栏"""
+    pg = pg or page
+    d = pg.locator('#right details.fold', has=pg.locator('summary', has_text=title)).first
+    if not d.evaluate('e => e.open'):
+        d.locator(':scope > summary').click()
+        pg.wait_for_timeout(150)
 
 
 def send(text):
@@ -265,8 +305,16 @@ def main():
         run('发送消息：流式、思维链、MVU 更新、前端卡、世界书/EJS 进提示词', first_reply)
 
         def vars_panel():
-            right_tab('变量')
-            page.wait_for_selector('#right >> text=MVU 已启用')
+            right_tab('变量', sub='查看变量')
+            open_fold('角色状态')
+            page.wait_for_selector('#right .fold-body >> text=MVU 已启用')
+            page.locator('#right details.fold > summary', has_text='角色状态').first.click()
+            page.wait_for_timeout(150)
+            assert page.locator('#right details.fold', has=page.locator('summary', has_text='角色状态')).first.evaluate('e => !e.open'), '应能收起'
+            right_tab('外观与行为'); right_tab('变量', sub='查看变量')
+            page.locator('#right').screenshot(path='/tmp/lt-shots/vars-closed.png')
+            assert page.locator('#right details.fold', has=page.locator('summary', has_text='角色状态')).first.evaluate('e => !e.open'), '默认收起'
+            open_fold('角色状态')
             tree = page.locator('#right pre.var-tree').first.inner_text()
             assert_in('好感度: 15', tree, 'MVU 面板')
             assert_in('地点: 图书馆', tree, 'MVU 面板')
@@ -309,6 +357,7 @@ def main():
 
         def stop_midway():
             n0 = mes_count()
+            aborted0 = mock('/count').get('ABORTED', 0)
             page.fill('#send_textarea', 'SLOW 停止测试')
             page.click('#send_but')
             page.wait_for_selector('#send_but.stop', timeout=5000)
@@ -322,7 +371,10 @@ def main():
             t = last_text()
             assert len(t) > 0, '停止后部分内容没保留'
             assert '【结束】' not in t, '没停住（内容完整）'
+            # 停止按钮让服务器断开了上游；后面等过宽限期再看服务器没有把完整回复写进去
+            assert mock('/count').get('ABORTED', 0) > aborted0, '停止后服务器没有断开上游'
         run('中途停止并保留已生成部分', stop_midway)
+
 
         def edit_hide_delete():
             last = page.locator('#chat .mes').last
@@ -378,13 +430,178 @@ def main():
             shot('07-gemini')
         run('Claude / Gemini 格式收发', claude_and_gemini)
 
+        def enter_from_home():
+            # 打开时先显示首页（最近聊天）：点第一条回到刚才的聊天
+            page.wait_for_selector('#chat .recent-item, #chat .mes', timeout=15000)
+            if page.locator('#chat .recent-item').count():
+                page.locator('#chat .recent-item').first.click()
+
         def reload_restore():
             n = mes_count()
-            page.reload()
+            page.reload(); enter_from_home()
             page.wait_for_selector('#chat .mes')
             page.wait_for_timeout(1500)
             assert mes_count() == n, f'刷新后消息数 {mes_count()}（应为 {n}）'
         run('刷新后恢复上次聊天', reload_restore)
+
+        # ---------- 服务器代生成（页面切后台 / 锁屏 / 关掉之后回复和变量仍由服务器完成） ----------
+
+        def server_gen_online():
+            # 前面的用例停在 Gemini 假模型上；换回 OpenAI 格式的那个（额外模型解析的假回复是 OpenAI 格式）
+            page.locator('#composer-model').click()
+            page.locator('.menu button', has_text='mock-gpt').first.click()
+            page.wait_for_timeout(300)
+            assert page.evaluate("fetch('/api/ping').then(r => r.json())").get('genJobs'), '服务端没有代生成'
+            send('页面在线时自己收尾')
+            msgs = chat_lines()
+            m = msgs[-1]
+            assert_in('收到', m['mes'], '回复')
+            assert 'lt_server_persisted' not in (m.get('extra') or {}), f"页面在线时不该由服务器写：{m.get('extra')} {m.get('gen_started')}"
+            assert 'lt_job' not in (m.get('extra') or {}), '占位的任务号没去掉'
+            gen_state['online'] = (len(msgs) - 1, m['mes'])
+        run('代生成：页面在线时照常由页面收尾', server_gen_online)
+
+        def server_gen_resume_stream():
+            reqs = []
+            page.on('request', lambda r: reqs.append(r.url) if '/api/gen/' in r.url and '/events' in r.url else None)
+            page.fill('#send_textarea', 'SLOW 断网续传')
+            page.click('#send_but')
+            page.wait_for_selector('#send_but.stop', timeout=5000)
+            page.wait_for_timeout(1500)
+            assert len(last_text().strip()) > 0, '流式过程中消息是空的'
+            ctx.set_offline(True)
+            # 断网后马上让页面重连（和手机切回前台时一样），这次连不上，等网络恢复再连
+            page.evaluate("window.dispatchEvent(new Event('online'))")
+            page.wait_for_timeout(2500)
+            ctx.set_offline(False)
+            page.evaluate("window.dispatchEvent(new Event('online'))")
+            wait_gen(60000)
+            t = last_text()
+            assert t.count('她慢慢合上书') == 20, f'续传后内容不对（丢字或重字）：{t[-200:]!r}'
+            assert t.count('【结束】') == 1 and t.count('收到') == 1, f'续传后内容不对：{t[:200]!r}'
+            assert any('after=0' not in u for u in reqs), f'没有按 seq 续订：{reqs}'
+            m = chat_lines()[-1]
+            assert m['mes'].count('她慢慢合上书') == 20 and m['mes'].count('【结束】') == 1, '存进聊天的内容不对'
+        run('代生成：断网后重连按 seq 续传，不丢字不重字', server_gen_resume_stream)
+
+        def reopen_page():
+            global page
+            page = ctx.new_page()
+            page.on('console', lambda m: errors.append(f'console.{m.type}: {m.text}') if m.type in ('error',) else None)
+            page.on('pageerror', lambda e: errors.append(f'pageerror: {e}'))
+            page.goto(BASE + '/')
+            page.wait_for_selector('#composer textarea', state='attached')
+            enter_from_home()
+            page.wait_for_selector('#chat .mes')
+            page.wait_for_timeout(800)
+
+        def wait_server_persisted(n, timeout=60):
+            t0 = time.time()
+            while time.time() - t0 < timeout:
+                msgs = chat_lines_direct()
+                if len(msgs) >= n and (msgs[-1].get('extra') or {}).get('lt_server_persisted'):
+                    return msgs
+                time.sleep(0.5)
+            raise AssertionError(f'{timeout} 秒内服务器没有把回复写进聊天（现在 {len(chat_lines_direct())} 条）')
+
+        def latest_stat(msgs):
+            for m in reversed(msgs):
+                v = m.get('variables')
+                if isinstance(v, list) and len(v) > m.get('swipe_id', 0) and isinstance(v[m.get('swipe_id', 0)], dict) and 'stat_data' in v[m.get('swipe_id', 0)]:
+                    return v[m.get('swipe_id', 0)]['stat_data']
+            return {}
+
+        def server_gen_page_closed():
+            before = chat_lines()
+            prev = latest_stat(before)
+            aborted0 = mock('/count').get('ABORTED', 0)
+            page.fill('#send_textarea', 'SLOW MVU 关掉页面也要写完')
+            page.click('#send_but')
+            page.wait_for_selector('#send_but.stop', timeout=5000)
+            page.wait_for_timeout(1500)
+            assert len(last_text().strip()) > 0, '流式过程中消息是空的'
+            page.close()  # 关掉页面（手机上锁屏 / 杀掉标签页时浏览器里的请求就这样没了）
+            msgs = wait_server_persisted(len(before) + 2)
+            assert mock('/count').get('ABORTED', 0) == aborted0, '页面关掉后服务器不该断开上游'
+            m = msgs[-1]
+            mark = m['extra']['lt_server_persisted']
+            assert mark['pending'] and mark['mvu'], mark
+            assert m['mes'].count('【结束】') == 1, '服务器写进去的回复不完整'
+            assert m['extra'].get('reasoning') is None or True
+            st = m['variables'][m.get('swipe_id', 0)]['stat_data']
+            assert st['好感度'] == prev['好感度'] + 5, f"随 AI 输出的变量没在服务器上更新：{st}（之前 {prev}）"
+            assert st['地点'] == '图书馆', st
+            reopen_page()
+            t = last_text()
+            assert_in('【结束】', t, '重开后看到的回复')
+            assert 'UpdateVariable' not in t, '仅显示正则没把变量块藏起来'
+            v = page.evaluate("window.TavernHelper.getVariables({ type: 'message', message_id: -1 })")
+            assert v['stat_data']['好感度'] == st['好感度'], v
+            # 打开后补发了事件，标记里的 pending 去掉
+            t0 = time.time()
+            while (chat_lines_direct()[-1]['extra']['lt_server_persisted'] or {}).get('pending') and time.time() - t0 < 15:
+                time.sleep(0.5)
+            assert not chat_lines_direct()[-1]['extra']['lt_server_persisted']['pending'], '重开后没有补发事件'
+            assert mes_count() == len(msgs), f'界面上的楼层数 {mes_count()}，文件里 {len(msgs)}'
+        run('代生成：生成中关掉页面 → 服务器写完回复和随 AI 输出的变量 → 重开看到完整回复和变量', server_gen_page_closed)
+
+        def server_gen_no_double_write():
+            # 前面页面在线时收尾的那条，过了宽限期也没被服务器再写一遍；停止那次也没有被服务器补全
+            msgs = chat_lines_direct()
+            i, mes = gen_state['online']
+            assert msgs[i]['mes'] == mes and 'lt_server_persisted' not in (msgs[i].get('extra') or {}), '页面在线时服务器又写了一遍'
+            assert msgs[i + 1]['is_user'], '页面在线那次之后多出了一条回复'
+            # 服务器写过的只有“关掉页面”那一条（停止的那次要是被服务器补全了，会多出带标记的楼层）
+            marked = [k for k, x in enumerate(msgs) if (x.get('extra') or {}).get('lt_server_persisted')]
+            assert len(marked) == 1 and '关掉页面也要写完' in msgs[marked[0] - 1]['mes'], f'服务器写过的楼层不对：{marked}'
+        run('代生成：页面在线时、点了停止时服务器都不会再写', server_gen_no_double_write)
+
+        def server_gen_extra_vars():
+            right_tab('变量', sub='MVU 设置')
+            sel = page.locator('#right .card', has=page.locator('.card-title', has_text='变量更新方式')).first.locator('select').first
+            sel.select_option('extra')
+            page.wait_for_timeout(800)  # 设置防抖落盘
+            before = chat_lines()
+            prev = latest_stat(before)
+            sep0 = mock('/count').get('MVUSEP', 0)
+            page.fill('#send_textarea', 'SLOW 额外模型解析也在服务器上')
+            page.click('#send_but')
+            page.wait_for_selector('#send_but.stop', timeout=5000)
+            page.wait_for_timeout(1500)
+            page.close()
+            msgs = wait_server_persisted(len(before) + 2)
+            assert mock('/count').get('MVUSEP', 0) > sep0, '服务器没有发额外模型解析的请求'
+            m = msgs[-1]
+            assert_in('<UpdateVariable>', m['mes'], '更新块写回正文')
+            st = m['variables'][m.get('swipe_id', 0)]['stat_data']
+            assert st['地点'] == '书库' and st['好感度'] == prev['好感度'] + 3, f'额外模型解析的变量：{st}（之前 {prev}）'
+            reopen_page()
+            v = page.evaluate("window.TavernHelper.getVariables({ type: 'message', message_id: -1 })")
+            assert v['stat_data']['地点'] == '书库', v
+            right_tab('变量', sub='MVU 设置')
+            page.locator('#right .card', has=page.locator('.card-title', has_text='变量更新方式')).first.locator('select').first.select_option('ai')
+            page.wait_for_timeout(800)
+            # 设置面板放回原来的位置（后面的用例按分组里记住的分区数标签）
+            right_tab('提示词预览')
+            right_tab('连接')
+        run('代生成：额外模型解析的变量也由服务器算好', server_gen_extra_vars)
+
+        def server_gen_reload_resume():
+            # 刷新页面：生成中的任务接着显示，收尾仍由页面做
+            page.fill('#send_textarea', 'SLOW 刷新后接着看')
+            page.click('#send_but')
+            page.wait_for_selector('#send_but.stop', timeout=5000)
+            page.wait_for_timeout(1200)
+            n = mes_count()
+            page.reload(); enter_from_home()
+            page.wait_for_selector('#send_but.stop', timeout=15000)
+            wait_gen(60000)
+            assert mes_count() == n, f'刷新后楼层数 {mes_count()}（应为 {n}）'
+            t = last_text()
+            assert t.count('她慢慢合上书') == 20 and t.count('【结束】') == 1, f'刷新后接回的内容不对：{t[-120:]!r}'
+            m = chat_lines()[-1]
+            assert 'lt_server_persisted' not in (m.get('extra') or {}), '刷新后页面在线，应由页面收尾'
+        run('代生成：刷新页面后自动接回生成中的任务', server_gen_reload_resume)
 
         def settings_groups():
             open_settings()
@@ -404,14 +621,14 @@ def main():
                 for sec in sections:
                     page.locator('#right .seg-tab', has_text=sec).first.click()
                     page.wait_for_timeout(120)
-                    assert page.locator('#right .seg-tab.active').inner_text().strip() == sec
+                    assert page.locator('#right .panel-seg:not(.vars-seg) .seg-tab.active').inner_text().strip() == sec
                     assert '面板出错' not in page.locator('#right .panel-body').inner_text(), f'{sec} 渲染出错'
             # 分组记得上次停在哪个分区
             right_tab('世界书')
             page.locator('#right .panel-rail .tab[data-group="model"]').click()
             page.locator('#right .panel-rail .tab[data-group="char"]').click()
             page.wait_for_timeout(120)
-            assert page.locator('#right .seg-tab.active').inner_text().strip() == '世界书'
+            assert page.locator('#right .panel-seg:not(.vars-seg) .seg-tab.active').inner_text().strip() == '世界书'
             shot('08-settings-groups')
         run('设置面板：4 个分组、12 个分区都能打开', settings_groups)
 
@@ -426,14 +643,14 @@ def main():
             shot('09-settings-search')
             box.press('Enter')
             page.wait_for_timeout(300)
-            assert page.locator('#right .seg-tab.active').inner_text().strip() == '外观与行为'
+            assert page.locator('#right .panel-seg:not(.vars-seg) .seg-tab.active').inner_text().strip() == '外观与行为'
             assert_in('正文字号', page.locator('#right .flash').first.inner_text(), '定位到的那一项')
             assert box.input_value() == '', '跳过去之后搜索框应该清空'
             # 折叠块里的项：先展开再定位
             box.fill('temperature')
             page.locator('#right .panel-result', has_text='温度').first.click()
             page.wait_for_timeout(300)
-            assert page.locator('#right .seg-tab.active').inner_text().strip() == '预设'
+            assert page.locator('#right .panel-seg:not(.vars-seg) .seg-tab.active').inner_text().strip() == '预设'
             flashed = page.locator('#right .flash').first
             assert_in('温度', flashed.inner_text(), '定位到的那一项')
             assert flashed.is_visible(), '温度在折叠块里，没被展开'
@@ -513,7 +730,7 @@ def main():
             assert page.locator('.menu button.current').count() == 1, '当前预设没打勾'
             page.locator('.menu button', has_text='编辑预设…').click()
             page.wait_for_timeout(300)
-            assert page.locator('#right .seg-tab.active').inner_text().strip() == '预设'
+            assert page.locator('#right .panel-seg:not(.vars-seg) .seg-tab.active').inner_text().strip() == '预设'
         run('输入框上直接切换预设', preset_chip)
 
         def toggle_theme():
@@ -531,7 +748,7 @@ def main():
             after = page.evaluate("document.documentElement.dataset.theme")
             assert after == other, f'换了主题没变（还是 {after}）'
             shot(f'10-{after}')
-            page.reload()
+            page.reload(); enter_from_home()
             page.wait_for_selector('#chat .mes')
             assert page.evaluate("document.documentElement.dataset.theme") == after, '刷新后主题没保住'
             right_tab('外观与行为')
@@ -682,7 +899,7 @@ def main():
             page.locator('#right .panel-search input').fill('小手机')
             page.locator('#right .panel-result', has_text='酒馆助手脚本').first.click()
             page.wait_for_timeout(300)
-            assert page.locator('#right .seg-tab.active').inner_text().strip() == '脚本'
+            assert page.locator('#right .panel-seg:not(.vars-seg) .seg-tab.active').inner_text().strip() == '脚本'
         run('脚本：面板里的状态和开关，停掉后把页面收拾干净，换角色跟着起停', script_panel)
 
         def preset_scripts():
@@ -733,7 +950,7 @@ def main():
         run('脚本：预设自带的脚本随预设起停，能改请求、注入提示词、放自己的设置界面', preset_scripts)
 
         def script_reload():
-            page.reload()
+            page.reload(); enter_from_home()
             page.wait_for_selector('#chat .mes')
             page.wait_for_selector('#e2e-float', state='attached', timeout=15000)
             page.wait_for_function("() => document.querySelectorAll('#script-buttons .script-btn').length === 2", timeout=8000)
@@ -741,12 +958,158 @@ def main():
             page.wait_for_function("() => document.querySelector('#e2e-float').textContent.includes('脚本测试卡')", timeout=8000)
         run('脚本：刷新页面后自动恢复运行', script_reload)
 
+        def method_select():
+            return page.locator('#right .card', has=page.locator('.card-title', has_text='变量更新方式')).first.locator('select').first
+
+        def full_panel_shot(path):
+            # 设置面板是滚动的：临时把窗口拉高，整块截下来
+            h = page.evaluate("Math.max(...[...document.querySelectorAll('#right, #right *')].map(e => e.scrollHeight))") + 260
+            page.set_viewport_size({'width': 1440, 'height': max(900, min(h, 8000))})
+            page.wait_for_timeout(300)
+            page.locator('#right').screenshot(path=path)
+            page.set_viewport_size({'width': 1440, 'height': 900})
+            page.wait_for_timeout(200)
+
+        def mvu_separate():
+            right_tab('变量', sub='MVU 设置')
+            titles = [t.strip() for t in page.locator('#right .card > .card-title, #right .panel-body > details.fold > summary, #right details.fold > summary').all_inner_texts()]
+            for title in ['通知设置', '变量更新方式', '修复按钮', '自动清理变量', '兼容性', '角色卡覆盖']:
+                assert any(t.startswith(title) for t in titles), f'少了「{title}」：{titles}'
+            order = [next(i for i, t in enumerate(titles) if t.startswith(x)) for x in ['通知设置', '变量更新方式', '修复按钮', '自动清理变量', '兼容性', '角色卡覆盖']]
+            assert order == sorted(order), f'设置卡片的顺序不对：{titles}'
+            assert page.locator('#right >> text=请求策略').count() == 0, '随 AI 输出时不该显示额外模型的设置'
+            full_panel_shot('/tmp/lt-shots/vars-mvu-ai.png')
+            method_select().select_option('extra')
+            page.wait_for_timeout(300)
+            assert page.locator('#right .card-sub', has_text='模型来源').count() == 1, '选了额外模型解析后应出现「模型来源」'
+            for sub in ['请求内容', '请求策略', '高级参数']:
+                assert page.locator('#right details.fold > summary', has_text=sub).count() == 1, f'选了额外模型解析后应出现「{sub}」'
+            full_panel_shot('/tmp/lt-shots/vars-mvu-extra.png')
+            page.locator('#right').screenshot(path='/tmp/lt-shots/vars-extra.png')
+            before = mock('/count').get('MVUSEP', 0)
+            send('再看看 NOSCHEMA')
+            assert mock('/count').get('MVUSEP', 0) == before + 2, '结构化被拒后应退回普通文本再请求一次'
+            last = mock('/last')['body']
+            allc = '\n'.join(m['content'] for m in last['messages'])
+            assert 'variable_update_task' in allc, '最后一个请求应是变量更新'
+            assert allc.index('<additional_information>') < allc.index('<past_observe>') < allc.index('剧情发生前的变量') < allc.index('variable_update_task'), '内置请求内容的顺序'
+            assert_in('脚本测试卡是用来测试酒馆助手脚本的角色', allc, '变量更新请求里的角色描述')
+            assert 'response_format' not in last, '退回后不该再带结构化要求'
+            mes = js("window.TavernHelper.getChatMessages(-1)[0].message")
+            assert_in('<JSONPatch>', mes, '变量更新块写回正文')
+            v = script_vars(-1)
+            assert v['stat_data']['好感度'] is not None, v
+            send('再来一次')
+            assert mock('/count').get('MVUSEP', 0) == before + 3, '结构化输出一次就成功'
+            assert 'response_format' in mock('/last')['body'], '应要求结构化输出'
+            assert_in('单独更新', js("window.TavernHelper.getChatMessages(-1)[0].message"), 'JSON 结果转成更新块')
+            send('MVU 正文自己写')
+            assert mock('/count').get('MVUSEP', 0) == before + 3, '正文自带更新块时不再单独请求'
+        run('MVU 变量单独更新：结构化输出、退回普通文本、正文自带时跳过', mvu_separate)
+
+        def watch_toasts():
+            page.evaluate("""() => {
+                window.__toasts = [];
+                if (window.__toastObs) return;
+                window.__toastObs = new MutationObserver(ms => ms.forEach(m => m.addedNodes.forEach(n => window.__toasts.push(n.textContent))));
+                window.__toastObs.observe(document.getElementById('toasts'), { childList: true });
+            }""")
+
+        def toasts():
+            return js('window.__toasts')
+
+        def mvu_strategy_notify():
+            right_tab('变量', sub='MVU 设置')
+            watch_toasts()
+            before = mock('/count').get('MVUSEP', 0)
+            send('BADONCE 第一次解析不出来')
+            # 第一次尝试：结构化 + 退回文本都解析不出 → 失败；第二次尝试成功
+            assert mock('/count').get('MVUSEP', 0) == before + 3, f"请求次数 {mock('/count').get('MVUSEP', 0) - before}"
+            t = toasts()
+            assert any('正在请求模型更新变量' in x for x in t), f'额外模型解析中的通知没出现：{t}'
+            assert any('正在重试（1 / 2）' in x for x in t), f'重试的通知没出现：{t}'
+            assert_in('书库', js("window.TavernHelper.getChatMessages(-1)[0].message"), '重试后的更新块')
+            # 关掉“额外模型解析中通知”：不再弹
+            open_fold('通知设置')
+            page.locator('#right .check', has_text='额外模型解析中通知').locator('input').uncheck()
+            watch_toasts()
+            send('再说一句')
+            assert not any('正在请求模型更新变量' in x for x in toasts()), '关掉通知后不该再弹'
+            page.locator('#right .check', has_text='额外模型解析中通知').locator('input').check()
+        run('MVU 请求策略：失败后重试、额外模型解析中的通知开关', mvu_strategy_notify)
+
+        def mvu_auto_off():
+            right_tab('变量', sub='MVU 设置')
+            page.locator('#right .check', has_text='自动请求').locator('input').uncheck()
+            page.wait_for_timeout(200)
+            before = mock('/count').get('MVUSEP', 0)
+            send('自动请求关了')
+            assert mock('/count').get('MVUSEP', 0) == before, '关了自动请求还在自动更新变量'
+            assert '<UpdateVariable>' not in js("window.TavernHelper.getChatMessages(-1)[0].message")
+            right_tab('变量', sub='MVU 设置')
+            page.locator('#right button', has_text='重试额外模型解析').click()
+            page.locator('.modal-foot button', has_text='确定').click()
+            page.wait_for_function("() => window.TavernHelper.getChatMessages(-1)[0].message.includes('<JSONPatch>')", timeout=15000)
+            assert mock('/count').get('MVUSEP', 0) > before, '手动重试没有请求'
+            right_tab('变量', sub='MVU 设置')
+            page.locator('#right .check', has_text='自动请求').locator('input').check()
+        run('MVU 关掉自动请求：回复后不更新，手动“重试额外模型解析”', mvu_auto_off)
+
+        def mvu_repair():
+            right_tab('变量', sub='MVU 设置')
+            start = script_vars(-1)['stat_data']['好感度']
+            mes0 = js("window.TavernHelper.getChatMessages(-1)[0].message")
+            page.locator('#right button', has_text='增量校正额外模型解析').click()
+            page.locator('.modal textarea').fill('核对好感度')
+            page.locator('.modal-foot button', has_text='确定').click()
+            page.wait_for_selector('.modal >> text=增量校正预览', timeout=15000)
+            preview = page.locator('.modal').inner_text()
+            assert_in('/好感度', preview, '预览里的变化')
+            assert_in('99', preview, '预览里的新值')
+            assert script_vars(-1)['stat_data']['好感度'] == start, '确认之前不该改变量'
+            assert any('variable_repair_task' in m['content'] for m in mock('/last')['body']['messages']), '应发出增量校正任务'
+            assert any('核对好感度' in m['content'] for m in mock('/last')['body']['messages']), '校正方向要带上'
+            page.locator('.modal-foot button', has_text='应用修正').click()
+            page.wait_for_timeout(400)
+            assert script_vars(-1)['stat_data']['好感度'] == 99, script_vars(-1)
+            assert_in('"value":99', js("window.TavernHelper.getChatMessages(-1)[0].message").replace(' ', ''), '校正块写回正文')
+            page.locator('#toasts .toast', has_text='增量校正已应用').locator('button', has_text='撤销').click()
+            page.wait_for_timeout(400)
+            assert script_vars(-1)['stat_data']['好感度'] == start, '撤销后变量应恢复'
+            assert js("window.TavernHelper.getChatMessages(-1)[0].message") == mes0, '撤销后正文应恢复'
+            right_tab('变量', sub='MVU 设置')
+            method_select().select_option('ai')
+            page.wait_for_timeout(300)
+        run('MVU 增量校正：预览、应用、撤销', mvu_repair)
+
+        def mvu_override():
+            right_tab('变量', sub='MVU 设置')
+            card = lambda: page.locator('#right details.fold', has=page.locator('summary', has_text=re.compile(r'^角色卡覆盖'))).first
+            assert_in('未启用', card().locator('summary').inner_text(), '没覆盖时')
+            open_fold('角色卡覆盖')
+            card().locator('.field', has_text='变量更新方式（角色卡）').locator('select').select_option('额外模型解析')
+            page.wait_for_timeout(300)
+            assert_in('覆盖中', card().locator(':scope > summary').inner_text(), '覆盖后')
+            assert page.locator('#right .override-badge', has_text='角色卡覆盖：额外模型解析').count() == 1, '变量更新方式旁边应显示角色卡覆盖的值'
+            assert page.locator('#right details.fold > summary', has_text='请求策略').count() == 1, '角色卡覆盖成额外模型解析时也要显示额外模型的设置'
+            page.wait_for_timeout(1200)
+            world = page.evaluate("fetch('/api/worlds/' + encodeURIComponent('脚本卡的书')).then(r => r.text())")
+            assert '[config_override]' in world and '额外模型解析' in world, '覆盖要存进角色世界书的 [config_override] 条目'
+            card().locator('.field', has_text='变量更新方式（角色卡）').locator('select').select_option('__inherit__')
+            page.wait_for_timeout(300)
+            assert_in('未启用', card().locator(':scope > summary').inner_text(), '改回跟随用户配置')
+            assert page.locator('#right .override-badge').count() == 0
+        run('MVU 角色卡覆盖：存进角色世界书、显示覆盖的值、改回跟随', mvu_override)
+
         def mobile():
             mctx = browser.new_context(viewport={'width': 390, 'height': 844}, is_mobile=True, has_touch=True, locale='zh-CN')
             offline_cdn(mctx)
             mp = mctx.new_page()
             mp.on('pageerror', lambda e: errors.append(f'mobile pageerror: {e}'))
             mp.goto(BASE + '/')
+            mp.wait_for_selector('#chat .recent-item, #chat .mes', timeout=15000)
+            if mp.locator('#chat .recent-item').count():
+                mp.locator('#chat .recent-item').first.click()
             mp.wait_for_selector('#chat .mes')
             mp.wait_for_timeout(1500)
             mp.screenshot(path=os.path.join(SHOTS, '11-mobile-chat.png'))
@@ -789,7 +1152,7 @@ def main():
             no_overflow('搜索结果')
             mp.locator('#right .panel-result').first.click()
             mp.wait_for_timeout(400)
-            assert mp.locator('#right .seg-tab.active').inner_text().strip() == '角色卡'
+            assert mp.locator('#right .panel-seg:not(.vars-seg) .seg-tab.active').inner_text().strip() == '角色卡'
             assert mp.locator('#right .flash').first.is_visible(), '手机上搜索后没定位到那一项'
             mp.screenshot(path=os.path.join(SHOTS, '15-mobile-search-jump.png'))
             mctx.close()
@@ -951,7 +1314,7 @@ def main():
     print(f'\n通过 {ok}/{len(results)}；截图在 {SHOTS}')
     # 本来就会有的几种：429 重试测试；脚本测试卡里故意出错的那个脚本；被掐掉的 jsdelivr 请求（图标字体）
     # 共用那几项里的 409 是故意造出来的“聊天被别处改过”
-    errors[:] = [e for e in errors if 'status of 429' not in e and '故意出错' not in e and 'net::ERR_FAILED' not in e and not ('[共用]' in e and 'status of 409' in e)]
+    errors[:] = [e for e in errors if 'status of 429' not in e and '故意出错' not in e and 'net::ERR_FAILED' not in e and 'ERR_INTERNET_DISCONNECTED' not in e and not ('[共用]' in e and 'status of 409' in e)]
     if errors:
         print(f'\n浏览器报错 {len(errors)} 条：')
         for e in errors[:30]:

@@ -37,9 +37,11 @@ function parseHeaders(text) {
 }
 
 /**
+ * 按连接配置向上游发请求，返回 fetch 的 Response。浏览器转发（proxyRequest）和服务器代生成（gen-jobs.mjs）共用。
  * @param {import('./store.mjs').Store} store
+ * @param {{path: string, method?: string, body?: object}} payload
  */
-export async function proxyRequest(store, req, res, connId, payload) {
+export async function openUpstream(store, connId, payload, signal) {
     const settings = await store.getSettings();
     const conn = (settings.connections ?? []).find(c => c.id === connId);
     if (!conn) throw new HttpError(404, '找不到这个连接配置');
@@ -52,22 +54,34 @@ export async function proxyRequest(store, req, res, connId, payload) {
         ...parseHeaders(conn.extraHeaders),
         ...authHeaders(conn, key),
     };
+    try {
+        return await fetch(url, {
+            method: payload.method || 'POST',
+            headers,
+            body: payload.method === 'GET' ? undefined : JSON.stringify(payload.body ?? {}),
+            signal,
+        });
+    } catch (e) {
+        if (signal?.aborted) throw e;
+        const cause = e?.cause?.code || e?.cause?.message || e.message;
+        throw new HttpError(502, `连不上接口：${cause}（地址 ${conn.baseUrl}）`);
+    }
+}
+
+/**
+ * @param {import('./store.mjs').Store} store
+ */
+export async function proxyRequest(store, req, res, connId, payload) {
     const ac = new AbortController();
     // 只看响应是否提前关闭：Node 16+ 的 req 'close' 在请求体读完时就会触发，不能拿来判断断开
     res.on('close', () => { if (!res.writableEnded) ac.abort(); });
     let upstream;
     try {
-        upstream = await fetch(url, {
-            method: payload.method || 'POST',
-            headers,
-            body: payload.method === 'GET' ? undefined : JSON.stringify(payload.body ?? {}),
-            signal: ac.signal,
-        });
+        upstream = await openUpstream(store, connId, payload, ac.signal);
     } catch (e) {
         if (ac.signal.aborted) return;
-        const cause = e?.cause?.code || e?.cause?.message || e.message;
-        sendJson(res, 502, { error: { message: `连不上接口：${cause}（地址 ${conn.baseUrl}）` } });
-        return;
+        if (e instanceof HttpError && e.status === 502) { sendJson(res, 502, { error: { message: e.message } }); return; }
+        throw e;
     }
     const type = upstream.headers.get('content-type') ?? 'application/octet-stream';
     res.writeHead(upstream.status, {

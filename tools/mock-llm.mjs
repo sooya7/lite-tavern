@@ -4,7 +4,8 @@
 //   ERR429      第一次返回 429，重试后正常
 //   ERRTEXT     返回 200 但正文是“failed with status 429”（模拟中转把报错当正文）
 //   EMPTY       返回空回复（第一次），之后正常
-//   SLOW        每个分片间隔 120ms（方便测试中途停止）
+//   SLOW        每个分片间隔 120ms（方便测试中途停止、页面断开后服务器代生成、断线续传）
+//   流式回复没发完就被断开时计数 ABORTED（测停止按钮确实断开了上游、页面断开时服务器没断开上游）
 //   MVU         回复里带 <UpdateVariable> JSONPatch
 //   HTML        回复里带一个完整 HTML 前端代码块
 //   THINK       回复以 <think>…</think> 开头
@@ -87,7 +88,33 @@ const server = http.createServer(async (req, res) => {
         res.end(JSON.stringify({ error: { message: 'Rate limit (mock)' } }));
         return;
     }
+    // 变量单独更新（额外模型解析）请求：结构化时回 JSON，否则回 <UpdateVariable> 文本。
+    // 认法：请求里有任务说明的标签。“最新回复”取 </past_observe> 前面那条（正文会复述用户说的话）：
+    //   NOSCHEMA  拒绝结构化输出（400）
+    //   BADONCE   前两次请求回一段解析不出更新的话（模拟一次尝试失败，测“依次请求，失败后重试”）
+    // 增量校正请求（variable_repair_task）：把好感度改成 99
+    const whole = JSON.stringify(body);
+    if (whole.includes('variable_update_task') || whole.includes('variable_repair_task')) {
+        counters.MVUSEP = (counters.MVUSEP ?? 0) + 1;
+        const msgs = Array.isArray(body.messages) ? body.messages : [];
+        const close = msgs.findIndex(m => m.content === '</past_observe>');
+        const latest = close > 0 ? String(msgs[close - 1].content ?? '') : userText;
+        const schema = !!(body.response_format || body.generationConfig?.responseJsonSchema || body.tool_choice?.type === 'tool');
+        if (schema && /NOSCHEMA/.test(latest)) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: { message: 'response_format not supported (mock)' } })); return; }
+        let text;
+        if (/BADONCE/.test(latest) && (counters.BADONCE = (counters.BADONCE ?? 0) + 1) <= 2) text = '我不太确定要改什么。';
+        else {
+            const repair = whole.includes('variable_repair_task');
+            if (repair) counters.REPAIR = (counters.REPAIR ?? 0) + 1;
+            const patch = repair ? [{ op: 'replace', path: '/好感度', value: 99 }] : [{ op: 'delta', path: '/好感度', value: 3 }, { op: 'replace', path: '/地点', value: '书库' }];
+            text = schema ? JSON.stringify({ analysis: repair ? '校正' : '单独更新', patch }) : `<UpdateVariable>\n<JSONPatch>\n${JSON.stringify(patch)}\n</JSONPatch>\n</UpdateVariable>`;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ id: 'chatcmpl-mock', object: 'chat.completion', choices: [{ index: 0, message: { role: 'assistant', content: text }, finish_reason: 'stop' }] }));
+        return;
+    }
     let reply = makeReply(userText);
+    if (body.stream || p.includes(':streamGenerateContent')) res.on('close', () => { if (!res.writableEnded) counters.ABORTED = (counters.ABORTED ?? 0) + 1; });
     if (/ERRTEXT/.test(userText) && once('ERRTEXT')) reply = { text: 'Request failed with status 429: upstream busy', reasoning: '' };
     if (/EMPTY/.test(userText) && once('EMPTY')) reply = { text: '', reasoning: '' };
 

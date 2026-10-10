@@ -7,12 +7,13 @@ import { render } from '../public/js/core/ejs.js';
 import { applyCommands, parseCommands, extractUpdateBlocks, processMessage, collectInitVars, processMessageWithEvents, toCommandInfo, fromCommandInfo, extractCommands, withStatusPlaceholder, detectMvu, MVU_EVENTS } from '../public/js/core/mvu.js';
 import { buildChatCompletion, parseMesExamples, parseExampleIntoIndividual } from '../public/js/core/prompt.js';
 import { normalizePreset, newCustomPrompt } from '../public/js/core/preset.js';
-import { postProcessMessages, buildRequest, splitThinking, parseStreamEvent } from '../public/js/core/providers.js';
+import { postProcessMessages, buildRequest, splitThinking, parseStreamEvent, parseFullResponse } from '../public/js/core/providers.js';
 import { writeCardPng, readCardJson, BLANK_PNG } from '../public/js/core/png.js';
 import { parseChatJsonl, serializeChat, addSwipe, setSwipe } from '../public/js/core/chat.js';
 import { VariableManager } from '../public/js/core/vars.js';
 import { extractFrontends } from '../public/js/ui/render.js';
 import { decodeScaled, encodePng, makeThumbnail } from '../server/thumb.mjs';
+import { diffJson, applyJsonOps } from '../public/js/core/jsondiff.js';
 import fs from 'node:fs';
 import { GROUPS, TAB_LABELS, groupOf, pathOf } from '../public/js/ui/panels/nav.js';
 import { FEATURES, searchFeatures } from '../public/js/ui/panels/search.js';
@@ -789,4 +790,61 @@ test('从酒馆导入 API 连接：连接配置和 Key 一起搬，认得出已�
     } finally {
         fs.rmSync(base, { recursive: true, force: true });
     }
+});
+
+test('按字段的差异：生成后能还原，改一个字段只带那个字段', () => {
+    const a = { mes: '旧', swipes: ['旧', '二'], swipe_id: 0, extra: { x: 1, y: 2 }, variables: [{ stat_data: { 好感度: 1, 地点: '图书馆' } }] };
+    const b = { mes: '新', swipes: ['新'], swipe_id: 0, extra: { x: 1, z: 3 }, variables: [{ stat_data: { 好感度: 2, 地点: '图书馆' } }], is_user: false };
+    const ops = diffJson(a, b);
+    assert.deepEqual(applyJsonOps(structuredClone(a), JSON.parse(JSON.stringify(ops))), b);
+    assert.ok(!JSON.stringify(ops).includes('图书馆'), '没变的字段不传');
+    assert.deepEqual(diffJson(a, structuredClone(a)), []);
+    assert.throws(() => applyJsonOps({}, [{ p: ['__proto__', 'x'], v: 1 }]));
+    assert.deepEqual(applyJsonOps([1, 2], [{ p: [], v: 5 }]), 5);
+});
+
+test('聊天按行 / 按字段打补丁保存，底稿行数不对就拒绝', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lt-patch-'));
+    try {
+        const store = new Store(dir);
+        const h = { user_name: 'U', character_name: 'C', chat_metadata: { v: 1 } };
+        const m1 = { name: 'C', mes: '你好', swipes: ['你好'], swipe_id: 0 };
+        const v1 = await store.saveChat('卡', '聊', serializeChat(h, [m1]));
+        const m1b = { ...m1, mes: '改了', swipes: ['改了'] };
+        const m2 = { name: 'U', is_user: true, mes: '新的一楼' };
+        const v2 = await store.patchChat('卡', '聊', { baseCount: 2, count: 3, set: { 2: JSON.stringify(m2) }, edit: { 1: diffJson(m1, m1b) } }, { expect: v1 });
+        const back = parseChatJsonl(await store.readChat('卡', '聊'));
+        assert.deepEqual(back.messages, [m1b, m2]);
+        await assert.rejects(store.patchChat('卡', '聊', { baseCount: 2, count: 2, set: {} }, { expect: v2 }), e => e.code === 'patch-base');
+        await assert.rejects(store.patchChat('卡', '聊', { baseCount: 3, count: 3, set: {} }, { expect: v1 }), e => e.code === 'chat-conflict');
+    } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test('图片输入、工具调用、结构化输出：三家接口的请求体和结果解析', async () => {
+    const msgs = [{ role: 'system', content: '系统' }, { role: 'user', content: '看图' }];
+    const params = { temperature: 1, top_p: 1, max_tokens: 100, frequency_penalty: 0, presence_penalty: 0, stream: true, top_k: 0, seed: -1 };
+    const img = 'data:image/png;base64,QUJD';
+    const tools = [{ type: 'function', function: { name: 'roll', description: '掷骰', parameters: { type: 'object', properties: { n: { type: 'number' } } } } }];
+    const o = buildRequest({ provider: 'openai', model: 'm' }, { messages: msgs, params, images: [img], tools, toolChoice: 'any' });
+    assert.equal(o.stream, false);
+    assert.deepEqual(o.body.messages[1].content, [{ type: 'text', text: '看图' }, { type: 'image_url', image_url: { url: img } }]);
+    assert.equal(o.body.tool_choice, 'required');
+    const js = buildRequest({ provider: 'openai', model: 'm' }, { messages: msgs, params, jsonSchema: { name: 'out', value: { type: 'object' } } });
+    assert.equal(js.body.response_format.type, 'json_schema');
+    const c = buildRequest({ provider: 'claude', model: 'm' }, { messages: msgs, params, images: [img], jsonSchema: { name: 'out', value: { type: 'object' } } });
+    assert.equal(c.body.messages.at(-1).content[0].type, 'image');
+    assert.equal(c.body.messages.at(-1).content[0].source.data, 'QUJD');
+    assert.deepEqual(c.body.tool_choice, { type: 'tool', name: 'out' });
+    const g = buildRequest({ provider: 'gemini', model: 'm' }, { messages: msgs, params, images: [img], tools });
+    assert.deepEqual(g.body.contents.at(-1).parts[1], { inlineData: { mimeType: 'image/png', data: 'QUJD' } });
+    assert.equal(g.body.tools[0].functionDeclarations[0].name, 'roll');
+    assert.equal(g.body.toolConfig.functionCallingConfig.mode, 'AUTO');
+    const ro = parseFullResponse('openai', { choices: [{ message: { content: '', tool_calls: [{ id: 'a', function: { name: 'roll', arguments: '{"n":2}' } }] } }] });
+    assert.equal(ro.toolCalls[0].function.name, 'roll');
+    const rc = parseFullResponse('claude', { content: [{ type: 'tool_use', id: 't', name: 'out', input: { x: 1 } }] });
+    assert.equal(rc.toolCalls[0].function.arguments, '{"x":1}');
+    const rg = parseFullResponse('gemini', { candidates: [{ content: { parts: [{ functionCall: { name: 'roll', args: { n: 3 } } }] } }] });
+    assert.equal(rg.toolCalls[0].function.arguments, '{"n":3}');
 });

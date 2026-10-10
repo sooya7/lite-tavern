@@ -4,6 +4,8 @@ import { state, eventSource } from '../state.js';
 import { messageText } from '../core/chat.js';
 import { setPath } from '../core/util.js';
 
+// 前端卡运行时的版本号：改了 frontend-runtime.js 就改这里，iframe 才会用新的（平时走长期缓存，不用每个 iframe 都请求一次）
+const RT_V = '20261010h12';
 const frames = new Map(); // frameId → {iframe, messageId}
 let nextId = 1;
 let handlers = {};
@@ -60,15 +62,50 @@ function safeJson(obj) {
     return JSON.stringify(obj).split('<').join(BS + 'u003c').split(LS).join(BS + 'u2028').split(PS).join(BS + 'u2029');
 }
 
+// 沙箱 iframe 没有自己的 localStorage：用宿主的 localStorage（加前缀）给卡片模拟一份，折叠状态、皮肤等才能记住
+const FS_PREFIX = 'lt.fs.';
+function storeSnapshot() {
+    const out = {};
+    try {
+        for (let i = 0; i < localStorage.length; i++) {
+            const k = localStorage.key(i);
+            if (k && k.startsWith(FS_PREFIX)) out[k.slice(FS_PREFIX.length)] = localStorage.getItem(k);
+        }
+    } catch { /* 隐私模式 */ }
+    return out;
+}
+function storeWrite(op, key, value) {
+    try {
+        if (op === 'set') localStorage.setItem(FS_PREFIX + key, String(value));
+        else if (op === 'remove') localStorage.removeItem(FS_PREFIX + key);
+        else if (op === 'clear') for (const k of Object.keys(storeSnapshot())) localStorage.removeItem(FS_PREFIX + k);
+    } catch { /* 存不下就算了 */ }
+}
+
+const composer = () => document.getElementById('send_textarea');
+/** 把文字放进输入框（前端卡的剧情选项、/setinput 用） */
+export function setComposerInput(text) {
+    const el = composer();
+    if (!el) return;
+    el.value = String(text ?? '');
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+}
+// 输入框内容同步给各前端卡，getChatInput() 才能同步读到
+document.addEventListener('input', (e) => {
+    if (e.target?.id !== 'send_textarea') return;
+    gc();
+    for (const [, f] of frames) f.iframe.contentWindow?.postMessage({ __lt: true, type: 'input', value: e.target.value }, '*');
+}, true);
+
 function buildDoc(html, frameId, messageId) {
-    const init = { frameId, snapshot: buildSnapshot(messageId) };
+    const init = { frameId, snapshot: buildSnapshot(messageId), store: storeSnapshot(), input: composer()?.value ?? '' };
     const vh = Math.max(window.innerHeight, 400) / 100;
     const head = `<meta charset="utf-8"><base target="_blank">`
         + `<style>:root{--lt-vh:${vh}px;color-scheme:normal}html,body{margin:0;background:transparent}</style>`
         + `<script>window.__LT_INIT=${safeJson(init)};</script>`
         + `<script src="${location.origin}/vendor/jquery.min.js"></script>`
         + `<script src="${location.origin}/vendor/lodash.min.js"></script>`
-        + `<script src="${location.origin}/frontend-runtime.js"></script>`;
+        + `<script src="${location.origin}/frontend-runtime.js?v=${RT_V}"></script>`;
     // vh 在 iframe 里会随 iframe 高度变化导致无限撑高，换成父窗口的视口高度
     let doc = String(html).replace(/(\d+(?:\.\d+)?)vh\b/g, 'calc(var(--lt-vh) * $1)');
     if (/<head[^>]*>/i.test(doc)) doc = doc.replace(/<head[^>]*>/i, (m) => m + head);
@@ -146,20 +183,39 @@ async function runRpc(frame, method, args) {
         case 'setChatMessages': return handlers.setChatMessages?.(...args);
         case 'deleteChatMessages': return handlers.deleteChatMessages?.(...args);
         case 'triggerSlash': return handlers.triggerSlash?.(...args) ?? '';
+        case 'setChatInput': setComposerInput(args[0]); return null;
         case 'generate': return handlers.scriptGenerate?.(args[0] ?? {}, { raw: false }) ?? '';
         case 'generateRaw': return handlers.scriptGenerate?.(args[0] ?? {}, { raw: true }) ?? '';
+        case 'helper': {
+            // 其余酒馆助手接口：转给页面上的完整实现（参数和返回值要能跨窗口复制，传函数的接口不走这里）
+            const [name, list] = args;
+            const fn = window.TavernHelper?.[name];
+            if (typeof fn !== 'function') throw new Error(`前端卡调用了暂不支持的接口：${name}`);
+            const r = await fn(...(Array.isArray(list) ? list : []));
+            if (typeof Response !== 'undefined' && r instanceof Response) return { ok: r.ok, status: r.status, body: await r.text() };
+            return r === undefined ? null : JSON.parse(JSON.stringify(r));
+        }
         default: throw new Error(`前端卡调用了暂不支持的接口：${method}`);
     }
 }
 
 window.addEventListener('message', async (e) => {
     const d = e.data;
-    if (!d || !d.__lt) return;
+    if (!d) return;
+    if (!d.__lt) {
+        // 有些卡直接 postMessage({type:'sendChat', text}) 给父页面：按酒馆的样子放进输入框
+        if (d.type === 'sendChat' && typeof d.text === 'string' && frameBySource(e.source)) setComposerInput(d.text);
+        return;
+    }
     const frame = frameBySource(e.source);
     if (!frame) return;
     if (d.type === 'height') {
         const hgt = Math.min(Math.max(Number(d.height) || 0, 20), 6000);
         frame.iframe.style.height = `${hgt}px`;
+        return;
+    }
+    if (d.type === 'storage') {
+        storeWrite(d.op, d.key, d.value);
         return;
     }
     if (d.type === 'error') {

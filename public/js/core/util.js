@@ -143,6 +143,11 @@ export function debounce(fn, ms = 300) {
         t = null;
         return fn(...args);
     };
+    /** 放弃还没执行的那次调用 */
+    wrapped.cancel = () => {
+        clearTimeout(t);
+        t = null;
+    };
     Object.defineProperty(wrapped, 'pending', { get: () => t !== null });
     return wrapped;
 }

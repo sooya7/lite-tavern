@@ -5,6 +5,7 @@ import { ChatSession } from './core/session.js';
 import { parseChatJsonl, newChatHeader, createGreetingMessage, createUserMessage, newChatName, messageText, syncSwipe } from './core/chat.js';
 import { cardGreetings } from './core/card.js';
 import { clone } from './core/util.js';
+import { relevantWorldNames } from './core/reply.js';
 import { toast, modal, h } from './ui/dom.js';
 
 let ui = {};
@@ -52,24 +53,18 @@ const toastrShim = {
 
 /** 把当前会话会用到的世界书都加载进来 */
 export async function loadRelevantWorlds() {
-    const names = new Set(state.settings.worldInfo?.globalSelect ?? []);
-    const linked = state.char?.card?.data?.extensions?.world;
-    if (linked) names.add(linked);
-    for (const n of state.settings.worldInfo?.charLore?.[state.char?.id] ?? []) names.add(n);
-    const chatWorld = state.chat?.header?.chat_metadata?.world_info;
-    if (chatWorld) names.add(chatWorld);
-    const pl = activePersona()?.lorebook;
-    if (pl) names.add(pl);
-    await Promise.all([...names].map(n => loadWorld(n)));
+    // 规则在 core/reply.js：服务器替页面写回复时按同一份规则加载世界书
+    const names = relevantWorldNames(state.settings, state.char?.card, state.char?.id, state.chat?.header?.chat_metadata, activePersona());
+    await Promise.all(names.map(n => loadWorld(n)));
 }
 
-export async function selectCharacter(file, { openLatest = true } = {}) {
+export async function selectCharacter(file, { openLatest = true, stay = false } = {}) {
     if (state.generating) { toast('正在生成，先停止再切换', 'warning'); return; }
     await flushPending();
     const card = await api.getCharacter(file);
     const id = file.replace(/\.(png|json)$/i, '');
-    state.char = { file, id, card };
-    state.view = 'chat';
+    state.char = { file, id, card, savedJson: JSON.stringify(card) };
+    if (!stay) state.view = 'chat';
     state.chat = null;
     state.session = null;
     state.chatList = await api.listChats(id);
@@ -128,15 +123,18 @@ onFileConflict(async ({ key, label, reload, overwrite }) => {
     }
 });
 
-export async function openChat(name) {
+export async function openChat(name, { stay = false } = {}) {
     if (!state.char) return;
     if (state.generating) { toast('正在生成，先停止再切换', 'warning'); return; }
     await flushPending();
     const { text, version } = await api.getChat(state.char.id, name);
     const { header, messages } = parseChatJsonl(text);
-    state.chat = { name, header, messages, version };
+    // 底稿：服务器上那一版的各行，之后保存只上传改过的行
+    const rawLines = text.split(/\r?\n/).filter(l => l.trim());
+    const base = rawLines.length === messages.length + 1 ? rawLines : null;
+    state.chat = { name, header, messages, version, base };
     state.session = null;
-    state.view = 'chat';
+    if (!stay) state.view = 'chat';
     state.settings.lastChat = { file: state.char.file, chat: name };
     saveSettings();
     await loadRelevantWorlds();
@@ -251,12 +249,14 @@ export async function reloadCharacters() {
 
 export async function setPreset(name) {
     await flushPending();
+    await eventSource.emit('oai_preset_changed_before', { preset: state.preset?.data ?? null, presetName: name });
     state.settings.activePreset = name;
     state.preset = null;
     await ensurePreset();
     state.session = null;
     saveSettings();
     await eventSource.emit(event_types.PRESET_CHANGED, { apiId: 'openai', name });
+    await eventSource.emit('oai_preset_changed_after');
     refresh(['panels', 'topbar']);
 }
 

@@ -5,13 +5,41 @@
     const INIT = window.__LT_INIT || {};
     let snap = INIT.snapshot || {};
     const frameId = INIT.frameId;
+    const realParent = window.parent;
     let seq = 0;
     const pending = new Map();
     const listeners = new Map();
 
     function post(msg) {
-        parent.postMessage({ __lt: true, frameId, ...msg }, '*');
+        realParent.postMessage({ __lt: true, frameId, ...msg }, '*');
     }
+
+    // 沙箱里 localStorage 不可用：换成宿主代存的一份（同步读，写入转给宿主）
+    function makeStorage(initial, persist) {
+        const m = new Map(Object.entries(initial || {}));
+        const send = (op, key, value) => { if (persist) post({ type: 'storage', op, key, value }); };
+        const api = {
+            getItem: (k) => (m.has(String(k)) ? m.get(String(k)) : null),
+            setItem: (k, v) => { m.set(String(k), String(v)); send('set', String(k), String(v)); },
+            removeItem: (k) => { m.delete(String(k)); send('remove', String(k)); },
+            clear: () => { m.clear(); send('clear'); },
+            key: (i) => [...m.keys()][i] ?? null,
+            get length() { return m.size; },
+        };
+        return new Proxy(api, {
+            get: (t, p) => (p in t ? t[p] : (typeof p === 'string' && m.has(p) ? m.get(p) : undefined)),
+            set: (t, p, v) => { api.setItem(p, v); return true; },
+            deleteProperty: (t, p) => { api.removeItem(p); return true; },
+        });
+    }
+    for (const [name, persist] of [['localStorage', true], ['sessionStorage', false]]) {
+        let ok = false;
+        try { ok = !!window[name]; } catch (e) { ok = false; }
+        if (!ok) {
+            try { Object.defineProperty(window, name, { value: makeStorage(persist ? INIT.store : {}, persist), configurable: true }); } catch (e) { /* 改不了就算了 */ }
+        }
+    }
+    let chatInput = String(INIT.input || '');
 
     function rpc(method, ...args) {
         return new Promise((resolve, reject) => {
@@ -23,12 +51,14 @@
 
     window.addEventListener('message', (e) => {
         const d = e.data;
-        if (!d || !d.__lt || e.source !== parent) return;
+        if (!d || !d.__lt || e.source !== realParent) return;
         if (d.type === 'rpc-result') {
             const p = pending.get(d.id);
             if (!p) return;
             pending.delete(d.id);
             if (d.error) p.reject(new Error(d.error)); else p.resolve(d.result);
+        } else if (d.type === 'input') {
+            chatInput = String(d.value ?? '');
         } else if (d.type === 'snapshot') {
             snap = d.snapshot;
         } else if (d.type === 'event') {
@@ -237,14 +267,89 @@
 
     const api = {
         getVariables, getAllVariables, replaceVariables, insertOrAssignVariables, insertVariables: insertOrAssignVariables, updateVariablesWith, deleteVariable,
+        getChatInput: () => chatInput,
+        setChatInput: (text) => { chatInput = String(text ?? ''); return rpc('setChatInput', chatInput); },
         getChatMessages, createChatMessages, setChatMessages, deleteChatMessages, triggerSlash, triggerSlashWithResult: triggerSlash, generate, generateRaw,
         eventOn, eventOnce, eventMakeLast: eventOn, eventMakeFirst: eventOn, eventEmit, eventRemoveListener, eventClearEvent, tavern_events, iframe_events,
         Mvu, errorCatched, waitGlobalInitialized, substitudeMacros, getCurrentMessageId, getLastMessageId, getMessageId: getCurrentMessageId,
         getCharData, getCharAvatarPath, getUserAvatarPath, getIframeName, getScriptId, SillyTavern,
         getTavernHelperVersion: () => '4.0.0', getFrontendVersion: () => '4.0.0',
     };
+    // 其余的酒馆助手接口转给宿主页面去做（返回 Promise）。只放参数能跨窗口复制的；要传函数的（xxxWith、registerMacroLike）不在其列
+    const PROXIED = ('getModelList getProxyPresetNames playAudio pauseAudio getAudioList replaceAudioList appendAudioList getAudioSettings setAudioSettings getCurrentAudio '
+        + 'getWorldbookNames getGlobalWorldbookNames rebindGlobalWorldbooks getCharWorldbookNames rebindCharWorldbooks getChatWorldbookName rebindChatWorldbook '
+        + 'getOrCreateChatWorldbook createWorldbook createOrReplaceWorldbook deleteWorldbook getWorldbook replaceWorldbook createWorldbookEntries '
+        + 'getLorebookSettings setLorebookSettings getLorebooks deleteLorebook createLorebook getCharLorebooks getCurrentCharPrimaryLorebook setCurrentCharLorebooks '
+        + 'getChatLorebook setChatLorebook getOrCreateChatLorebook getLorebookEntries replaceLorebookEntries setLorebookEntries createLorebookEntries deleteLorebookEntries '
+        + 'getPersonaNames getPersonaIds getCurrentPersonaName getCurrentPersonaId getPersonaAvatarPath getPersona createPersona createOrReplacePersona deletePersona replacePersona '
+        + 'getCharacterNames getCharacterIds getCurrentCharacterName getCurrentCharacterId getCharacter replaceCharacter createCharacter createOrReplaceCharacter deleteCharacter '
+        + 'getPresetNames getLoadedPresetName loadPreset getPreset replacePreset setPreset createPreset createOrReplacePreset deletePreset renamePreset '
+        + 'getTavernRegexes replaceTavernRegexes isCharacterTavernRegexesEnabled formatAsTavernRegexedString '
+        + 'importRawCharacter importRawChat importRawPreset importRawWorldbook importRawTavernRegex '
+        + 'isInstalledExtension getExtensionType getExtensionInstallationInfo installExtension uninstallExtension reinstallExtension updateExtension '
+        + 'injectPrompts uninjectPrompts getChatHistoryBrief stopGenerationById stopAllGeneration formatAsDisplayedMessage').split(' ');
+    function rpcRaw(method, ...args) {
+        return new Promise((resolve, reject) => {
+            const id = ++seq;
+            pending.set(id, { resolve, reject });
+            try { post({ type: 'rpc', id, method, args }); } catch (e) { pending.delete(id); reject(e); }
+        });
+    }
+    const RESPONSE_RETURNING = new Set(['importRawCharacter', 'importRawChat', 'importRawWorldbook', 'installExtension', 'uninstallExtension', 'reinstallExtension', 'updateExtension']);
+    for (const name of PROXIED) {
+        if (api[name]) continue;
+        api[name] = async (...args) => {
+            const r = await rpcRaw('helper', name, args);
+            // 返回 Response 的接口：宿主那边拆成了 {ok, status, body}，这里还原
+            if (RESPONSE_RETURNING.has(name) && r && typeof r === 'object' && 'status' in r && 'body' in r) return new Response(r.body, { status: r.status });
+            return r;
+        };
+    }
+    if (!api.getWorldbook) api.getWorldbook = (...a) => rpcRaw('helper', 'getWorldbook', a);
     Object.assign(window, api);
     window.TavernHelper = api;
+
+    // 很多卡直接摸 window.parent.document 里的 #send_textarea（酒馆里是同源的）。
+    // 这里沙箱跨源摸不到，给一个替身：只认聊天输入框，读写转给宿主
+    const noop = () => {};
+    const fakeInput = {
+        id: 'send_textarea', tagName: 'TEXTAREA', nodeName: 'TEXTAREA', style: {}, classList: { add: noop, remove: noop, contains: () => false, toggle: noop },
+        get value() { return chatInput; },
+        set value(v) { chatInput = String(v ?? ''); rpc('setChatInput', chatInput).catch(noop); },
+        get textContent() { return chatInput; },
+        dispatchEvent: () => true, focus: noop, blur: noop, click: noop, select: noop, setSelectionRange: noop,
+        addEventListener: noop, removeEventListener: noop, getAttribute: (k) => (k === 'id' ? 'send_textarea' : null), setAttribute: noop,
+        scrollIntoView: noop, closest: () => null, matches: (sel) => /send_textarea|textarea/i.test(String(sel)),
+    };
+    const isInputSel = (sel) => /send_textarea|^\s*textarea\b/i.test(String(sel));
+    const fakeDoc = {
+        querySelector: (sel) => (isInputSel(sel) ? fakeInput : null),
+        querySelectorAll: (sel) => (isInputSel(sel) ? [fakeInput] : []),
+        getElementById: (id) => (id === 'send_textarea' ? fakeInput : null),
+        getElementsByTagName: (t) => (/^textarea$/i.test(t) ? [fakeInput] : []),
+        addEventListener: noop, removeEventListener: noop, dispatchEvent: () => true,
+        createElement: (t) => document.createElement(t),
+        get body() { return null; }, get head() { return null; }, get documentElement() { return null; },
+    };
+    let sameOrigin = false;
+    try { sameOrigin = !!realParent.document; } catch (e) { sameOrigin = false; }
+    if (!sameOrigin && realParent !== window) {
+        const fakeParent = new Proxy({}, {
+            get(t, p) {
+                if (p === 'document') return fakeDoc;
+                if (p === 'postMessage') return (...a) => realParent.postMessage(...a);
+                if (p === 'localStorage') return window.localStorage;
+                if (p === 'sessionStorage') return window.sessionStorage;
+                if (p === 'indexedDB') { try { return window.indexedDB; } catch (e) { return undefined; } }
+                if (p === 'parent' || p === 'top') return fakeParent;
+                if (p === 'window' || p === 'self') return fakeParent;
+                try { return realParent[p]; } catch (e) { return undefined; }
+            },
+            set() { return true; },
+            has(t, p) { return p === 'document' || p === 'postMessage'; },
+        });
+        try { Object.defineProperty(window, 'parent', { value: fakeParent, configurable: true, writable: true }); } catch (e) { /* 浏览器不让换就算了 */ }
+    }
 
     // ---------- 自动高度 ----------
     let lastH = 0;

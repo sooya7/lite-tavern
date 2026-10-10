@@ -2,6 +2,7 @@
 // 只做插件实际会调的那几个：生成（OpenAI 兼容转发）、模型列表、世界书读写、设置读取、CSRF 令牌、插件目录列表。
 import fs from 'node:fs';
 import path from 'node:path';
+import { execFile } from 'node:child_process';
 import { HttpError, sendJson, readJson, serveFile, safeJoin } from './http.mjs';
 
 function parseHeaderText(text) {
@@ -98,6 +99,81 @@ export function listExtensions(dir) {
 
 export const EXT_URL_PREFIX = '/scripts/extensions/third-party/';
 
+// ---------- 插件安装 / 更新 / 卸载（酒馆的 /api/extensions/install|update|delete|version，用 git） ----------
+
+function git(args, cwd, timeout = 120000) {
+    return new Promise((resolve, reject) => {
+        execFile('git', args, { cwd, timeout, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
+            if (err) reject(new HttpError(500, `git 出错：${(stderr || err.message).toString().trim().slice(0, 400)}`));
+            else resolve(String(stdout).trim());
+        });
+    });
+}
+
+function extFolder(dir, name) {
+    const n = String(name ?? '').replace(/^third-party\//, '');
+    if (!n || n.includes('/') || n.includes('\\') || n.startsWith('.')) throw new HttpError(400, '插件名不对');
+    return path.join(dir, n);
+}
+
+function writableDir(dir) {
+    if (!dir) throw new HttpError(400, '没有配置插件目录');
+    fs.mkdirSync(dir, { recursive: true });
+    try { fs.accessSync(dir, fs.constants.W_OK); } catch { throw new HttpError(403, '插件目录是只读的（和酒馆共用时请在酒馆里装插件）'); }
+}
+
+async function extVersion(folder) {
+    const remoteUrl = await git(['config', '--get', 'remote.origin.url'], folder).catch(() => '');
+    const currentBranchName = await git(['rev-parse', '--abbrev-ref', 'HEAD'], folder).catch(() => '');
+    const currentCommitHash = await git(['rev-parse', 'HEAD'], folder).catch(() => '');
+    let isUpToDate = true;
+    try {
+        await git(['fetch', '--quiet', 'origin', currentBranchName || 'HEAD'], folder, 30000);
+        const remote = await git(['rev-parse', `origin/${currentBranchName}`], folder);
+        isUpToDate = remote === currentCommitHash;
+    } catch { /* 连不上远端就当是最新 */ }
+    return { currentBranchName, currentCommitHash, isUpToDate, remoteUrl };
+}
+
+function registerExtensionAdmin(router, extDir) {
+    router.post('/api/extensions/install', async (req) => {
+        const { url, branch } = await readJson(req);
+        const u = String(url ?? '').trim();
+        if (!/^https?:\/\/\S+$/i.test(u)) throw new HttpError(400, '插件地址要是 http(s) 开头的 git 仓库地址');
+        writableDir(extDir);
+        const name = u.replace(/\.git$/i, '').replace(/\/+$/, '').split('/').pop();
+        const folder = extFolder(extDir, name);
+        if (fs.existsSync(folder)) throw new HttpError(409, `插件「${name}」已经装过了`);
+        await git(['clone', '--depth', '1', ...(branch ? ['--branch', String(branch)] : []), u, folder], extDir);
+        let manifest = {};
+        try { manifest = JSON.parse(fs.readFileSync(path.join(folder, 'manifest.json'), 'utf8').replace(/^\uFEFF/, '')); } catch { /* 没有清单 */ }
+        return { version: manifest.version ?? '', author: manifest.author ?? '', display_name: manifest.display_name ?? name, extensionPath: folder };
+    });
+    router.post('/api/extensions/update', async (req) => {
+        const { extensionName } = await readJson(req);
+        writableDir(extDir);
+        const folder = extFolder(extDir, extensionName);
+        if (!fs.existsSync(path.join(folder, '.git'))) throw new HttpError(404, '这个插件不是用 git 装的，没法更新');
+        await git(['pull', '--ff-only'], folder);
+        const v = await extVersion(folder);
+        return { shortCommitHash: v.currentCommitHash.slice(0, 7), extensionPath: folder, isUpToDate: true, remoteUrl: v.remoteUrl };
+    });
+    router.post('/api/extensions/delete', async (req) => {
+        const { extensionName } = await readJson(req);
+        writableDir(extDir);
+        const folder = extFolder(extDir, extensionName);
+        if (!fs.existsSync(folder)) throw new HttpError(404, '没有这个插件');
+        await fs.promises.rm(folder, { recursive: true, force: true });
+        return { ok: true };
+    });
+    router.post('/api/extensions/version', async (req) => {
+        const { extensionName } = await readJson(req);
+        const folder = extFolder(extDir, extensionName);
+        if (!fs.existsSync(path.join(folder, '.git'))) throw new HttpError(404, '这个插件不是用 git 装的');
+        return extVersion(folder);
+    });
+}
+
 /** 插件的静态文件 */
 export function serveExtensionFile(req, res, dir, pathname) {
     if (!dir) throw new HttpError(404, '没有配置插件目录');
@@ -114,6 +190,7 @@ export function serveExtensionFile(req, res, dir, pathname) {
  */
 export function registerStCompat(router, store, { extDir }) {
     router.get('/api/extensions', async () => listExtensions(extDir));
+    registerExtensionAdmin(router, extDir);
 
     router.post('/api/backends/chat-completions/generate', async (req, res) => {
         const body = await readJson(req);

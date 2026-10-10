@@ -8,7 +8,9 @@ import { buildChatCompletion, PERSONA_POSITION, EXT_PROMPT_TYPE } from './prompt
 import { createTemplateRuntime, preprocessWorldEntries, classifySpecialEntries } from './template.js';
 import { messageText, isNarrator } from './chat.js';
 import { estimateMessageTokens, estimateTokens } from './tokens.js';
-import { collectInitVars, dumpYaml, detectMvu, processMessage, processMessageWithEvents, latestMvuVars, extractUpdateBlocks, withStatusPlaceholder, STATUS_PLACEHOLDER, MVU_EVENTS } from './mvu.js';
+import { collectInitVars, dumpYaml, detectMvu, processMessage, processMessageWithEvents, latestMvuVars, extractUpdateBlocks, withStatusPlaceholder, STATUS_PLACEHOLDER, MVU_EVENTS, isInitVarEntry } from './mvu.js';
+import { isMvuUpdateRule, isMvuPlotOnly, stripUpdateBlocks, MVU_DEFAULTS, readOverride, applyOverride, filterUpdateBooks, filterPlotBooks, unsupportedWorlds } from './mvu-extra.js';
+import { mirrorToChatVars } from './mvu-cleanup.js';
 import { cardDepthPrompt, cardRegexScripts, cardTavernHelperScripts, cardLinkedWorld, cardGreetings } from './card.js';
 import { presetTavernHelperScripts } from './preset.js';
 import { syncSwipe } from './chat.js';
@@ -22,6 +24,12 @@ export const DEFAULT_POWER = {
     ejs: true,
     ejsRender: true,
     mvu: 'auto', // auto | on | off
+    mvuSeparate: false, // 变量单独更新：正文不写更新块，写完后另发一次请求
+    mvuConnection: '', // 单独更新用的连接 id，空 = 当前连接
+    mvuModel: '', // 单独更新用的模型，空 = 连接自己的
+    mvuHistory: 2, // 单独更新时带上前面几楼做参考
+    mvuSchema: true, // 单独更新时要求结构化输出（接口不支持会自动退回普通文本）
+    ...MVU_DEFAULTS, // 通知、请求内容 / 策略、高级参数、自动清理、兼容性（见 core/mvu-extra.js）
     thinkAutoParse: true,
     regexAllowCharacter: true,
     regexAllowPreset: true,
@@ -180,6 +188,35 @@ export class ChatSession {
         return { global, character, chat, persona };
     }
 
+    /** 角色主世界书：绑定的世界书文件，没绑定就是卡里内嵌的那本。{world, entries, kind: 'linked'|'embedded'} */
+    primaryWorld() {
+        const linked = cardLinkedWorld(this.card);
+        if (linked && this.worlds[linked]) return { world: linked, entries: this.worlds[linked].entries ?? {}, kind: 'linked' };
+        if (!linked && this.card?.data?.character_book?.entries?.length) {
+            const w = characterBookToWorld(this.card.data.character_book);
+            return { world: this.card.data.character_book.name || `${this.names.char} 内嵌世界书`, entries: w.entries, kind: 'embedded' };
+        }
+        return linked ? { world: linked, entries: {}, kind: 'missing' } : null;
+    }
+
+    /** 角色卡覆盖（角色主世界书里关闭的 [config_override] 条目） */
+    mvuOverride() {
+        const pw = this.primaryWorld();
+        if (!pw) return { draft: {}, entry: null, error: '', world: null, kind: null };
+        return { ...readOverride(pw.entries), world: pw.world, kind: pw.kind };
+    }
+
+    /** 实际生效的变量设置：用户设置 + 角色卡覆盖 */
+    mvuSettings() {
+        const ov = this.mvuOverride();
+        return applyOverride(this.power, ov.error ? {} : ov.draft);
+    }
+
+    /** 额外模型解析开着时，没适配的世界书（给面板提示用） */
+    mvuUnsupportedWorlds() {
+        return unsupportedWorlds(this.worldBooks());
+    }
+
     allWorldEntries() {
         const b = this.worldBooks();
         const out = [];
@@ -229,6 +266,7 @@ export class ChatSession {
         });
         // 刚初始化、还没通知过监听 mag_variable_initialized 的脚本（变量结构脚本靠它补默认值）
         this.mvuInitPending = true;
+        if (this.chat.length === 1 && this.mvuSettings().mvuChatVars) mirrorToChatVars(this.meta, first.variables[first.swipe_id ?? 0] ?? {});
         this.vars.invalidate();
         return true;
     }
@@ -246,6 +284,44 @@ export class ChatSession {
         }
         this.vars.invalidate();
         return true;
+    }
+
+    /** 变量单独更新是否生效：MVU 启用且打开了单独更新 */
+    mvuSeparateActive() {
+        return !!this.mvuSettings().mvuSeparate && this.mvuEnabled();
+    }
+
+    /** 正文用的预设：单独更新时把教模型写更新块的提示词清空 */
+    mainPreset() {
+        if (!this.mvuSeparateActive() || !Array.isArray(this.preset?.prompts)) return this.preset;
+        if (!this.preset.prompts.some(p => isMvuUpdateRule(p?.content, p?.name))) return this.preset;
+        return { ...this.preset, prompts: this.preset.prompts.map(p => (isMvuUpdateRule(p?.content, p?.name) ? { ...p, content: '' } : p)) };
+    }
+
+    /**
+     * 单独更新请求要用的材料
+     * @param {number} index 要更新的那条 AI 回复
+     */
+    mvuUpdateParts(index) {
+        const msg = this.chat[index];
+        if (!msg || msg.is_user) return null;
+        const prev = latestMvuVars(this.chat, index - 1);
+        const statData = prev ? prev.vars.stat_data ?? {} : collectInitVars(this.allWorldEntries());
+        const sub = (t) => this.substitute(String(t ?? ''));
+        const rules = [];
+        for (const p of this.preset?.prompts ?? []) if (p?.content && isMvuUpdateRule(p.content, p.name)) rules.push(sub(p.content));
+        for (const e of this.allWorldEntries()) {
+            if (e.disable || isInitVarEntry(e) || isMvuPlotOnly(e.comment)) continue;
+            if (isMvuUpdateRule(e.content, e.comment)) rules.push(sub(e.content));
+        }
+        const n = Math.max(0, Number(this.power.mvuHistory ?? 2));
+        const history = [];
+        for (let i = index - 1; i >= 0 && history.length < n; i--) {
+            const m = this.chat[i];
+            if (!m || m.is_system) continue;
+            history.unshift({ name: m.name ?? '', text: stripUpdateBlocks(messageText(m)) });
+        }
+        return { rules, statData, history, reply: { name: msg.name ?? this.names.char, text: stripUpdateBlocks(messageText(msg)) } };
     }
 
     /** AI 回复完成后：从上一层变量 + 本条更新命令得到本层变量 */
@@ -289,6 +365,8 @@ export class ChatSession {
         // 变量结构脚本会去掉 display_data / delta_data，这里别把旧的留下来
         for (const k of ['display_data', 'delta_data']) if (!(k in variables)) delete merged[k];
         msg.variables[sid] = merged;
+        // 兼容性：最新楼层的变量也抄一份到聊天变量
+        if (msg === this.chat[this.chat.length - 1] && this.mvuSettings().mvuChatVars) mirrorToChatVars(this.meta, merged);
         const text = this.usesStatusPlaceholder() ? withStatusPlaceholder(content) : content;
         if (text !== msg.mes) {
             msg.mes = text;
@@ -325,7 +403,10 @@ export class ChatSession {
      *   fieldOverrides?: object}} opt 后四个是给脚本的 generate() 用的：只取最近几条聊天记录、整段替换聊天记录、
      *   在聊天记录末尾加几条（这次的用户输入）、覆盖角色描述等字段
      */
-    async preparePrompt({ type = 'normal', quietPrompt = '', dryRun = false, excludeLast = false, maxHistory, historyOverride, appendHistory, fieldOverrides, chatOverride } = {}) {
+    async preparePrompt({ type = 'normal', quietPrompt = '', dryRun = false, excludeLast = false, maxHistory, historyOverride, appendHistory, fieldOverrides, chatOverride, mvuPhase, mvuFilter, presetOverride } = {}) {
+        // mvuPhase === 'update'：给额外模型解析用（世界书按变量更新的规则筛，预设用完整的或 presetOverride）
+        const isUpdate = mvuPhase === 'update';
+        const preset = isUpdate ? (presetOverride ?? this.preset) : this.mainPreset();
         this.lastGenerationType = type;
         if (!dryRun) this.ensureMvuInit();
         const wiSettings = { ...DEFAULT_WI_SETTINGS, ...(this.settings.worldInfo ?? {}) };
@@ -365,8 +446,15 @@ export class ChatSession {
             const authorsNote = anDue ? { text: sub(meta.note_prompt ?? ''), position: Number(meta.note_position ?? 1), depth: Number(meta.note_depth ?? 4), role: Number(meta.note_role ?? 0) } : null;
 
             // 世界书
-            const books = this.worldBooks();
+            let books = this.worldBooks();
+            if (isUpdate) {
+                const f = filterUpdateBooks(books, mvuFilter ?? {});
+                books = f.books;
+                this.lastMvuFilter = { filtered: f.filtered, unsupported: f.unsupported, regexErrors: f.regexErrors, at: Date.now() };
+            } else if (this.mvuSeparateActive()) books = filterPlotBooks(books);
             let entries = getSortedEntries({ ...books, strategy: wiSettings.world_info_character_strategy });
+            // 变量单独更新：教模型写更新块的条目只进更新请求，不进正文
+            if (!isUpdate && this.mvuSeparateActive()) entries = entries.filter(e => !isMvuUpdateRule(e.content, e.comment));
             let special = [];
             if (runtime) {
                 const pre = await preprocessWorldEntries(entries, runtime, ejsCtx);
@@ -379,7 +467,7 @@ export class ChatSession {
                 messages: core.map(x => (wiSettings.world_info_include_names ? `${x.m.name}: ${x.text}` : x.text)).reverse(),
                 entries,
                 settings: wiSettings,
-                maxContext: Number(this.preset.openai_max_context ?? 32000),
+                maxContext: Number(preset.openai_max_context ?? 32000),
                 globalScanData: {
                     personaDescription: fields.persona,
                     characterDescription: fields.description,
@@ -424,7 +512,7 @@ export class ChatSession {
             const continueMsg = isContinue ? core[core.length - 1] : null;
 
             const built = buildChatCompletion({
-                preset: this.preset,
+                preset,
                 type,
                 names: this.names,
                 fields,

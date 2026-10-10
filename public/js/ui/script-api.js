@@ -19,6 +19,7 @@ import { getRegexedString, REGEX_PLACEMENT } from '../core/regex.js';
 import { normalizeWorld } from '../core/worldinfo.js';
 import { estimateTokens } from '../core/tokens.js';
 import { uuid, debounce, parseRegexFromString, humanizedDateTime } from '../core/util.js';
+import { createMoreApi } from './script-api-more.js';
 
 export const HELPER_VERSION = '4.11.3';
 export const TAVERN_VERSION = '1.18.0';
@@ -144,8 +145,9 @@ function resolveMessageIndex(id) {
 /** 当前卡 / 预设里某个 id 的脚本原对象（每次现找：预设被整体替换后旧引用就失效了） */
 export function findScriptRaw(scriptId, source) {
     const pools = [];
-    if (source !== 'preset' && state.char) pools.push(['character', state.char.card.data.extensions]);
-    if (source !== 'character' && state.preset) pools.push(['preset', state.preset.data.extensions]);
+    if ((!source || source === 'character') && state.char) pools.push(['character', state.char.card.data.extensions]);
+    if ((!source || source === 'preset') && state.preset) pools.push(['preset', state.preset.data.extensions]);
+    if (!source || source === 'global') pools.push(['global', globalScriptLib()]);
     for (const [src, ext] of pools) {
         const hit = flattenScriptTrees(scriptTreesOf(ext)).find(x => x.script.id === String(scriptId));
         if (hit) return { raw: hit.raw.value && hit.raw.content === undefined ? hit.raw.value : hit.raw, source: src };
@@ -154,7 +156,14 @@ export function findScriptRaw(scriptId, source) {
 }
 
 function persistSource(source) {
-    if (source === 'preset') savePreset(); else saveCharacter();
+    if (source === 'preset') savePreset(); else if (source === 'global') saveSettings(); else saveCharacter();
+}
+
+/** 全局脚本库（存在设置里，结构和卡里的 extensions 一样：{tavern_helper: {scripts, variables}}） */
+export function globalScriptLib() {
+    const s = (state.settings.scripts ??= {});
+    if (!s.global || typeof s.global !== 'object') s.global = { tavern_helper: { scripts: [], variables: {} } };
+    return s.global;
 }
 
 const notifyVars = debounce((type) => {
@@ -592,7 +601,6 @@ export function createScriptApi(rt) {
     // ----- 生成 -----
     const generate = (config) => scriptGenerate(deep(config ?? {}), { raw: false });
     const generateRaw = (config) => scriptGenerate(deep(config ?? {}), { raw: true });
-    const getModelList = async () => { throw new Error('轻酒馆没有实现 getModelList'); };
 
     // ----- 全局共享 -----
     const initializeGlobal = (name, value) => setGlobal(String(name), value, rt ?? null);
@@ -618,13 +626,15 @@ export function createScriptApi(rt) {
     };
     const uninjectPrompts = (ids) => { for (const id of ids ?? []) injections.delete(String(id)); };
 
-    // ----- 助手宏（登记下来，轻酒馆目前不在显示 / 提示词里应用它们） -----
+    // ----- 助手宏：发给模型的提示词和显示的楼层里都会替换（见 applyMacroLikes） -----
     const registerMacroLike = (regex, replace) => {
-        macroLikes.push({ regex, replace, owner: rt ?? null });
+        if (!(regex instanceof RegExp) && !(regex && typeof regex.source === 'string')) throw new Error('registerMacroLike 的第一个参数要是正则');
+        if (typeof replace !== 'function') throw new Error('registerMacroLike 的第二个参数要是函数');
+        if (!macroLikes.some(m => m.regex.source === regex.source)) macroLikes.push({ regex, replace, owner: rt ?? null });
         return { unregister: () => unregisterMacroLike(regex) };
     };
     const unregisterMacroLike = (regex) => {
-        const i = macroLikes.findIndex(m => String(m.regex) === String(regex));
+        const i = macroLikes.findIndex(m => m.regex.source === regex?.source || String(m.regex) === String(regex));
         if (i >= 0) macroLikes.splice(i, 1);
     };
 
@@ -915,12 +925,11 @@ export function createScriptApi(rt) {
         const type = option?.type ?? 'character';
         if (type === 'character') { if (!state.char) throw new Error('没有打开角色卡'); return { ext: (state.char.card.data.extensions ??= {}), source: 'character' }; }
         if (type === 'preset') { if (!state.preset) throw new Error('没有加载预设'); return { ext: (state.preset.data.extensions ??= {}), source: 'preset' }; }
-        return { ext: { tavern_helper: { scripts: [] } }, source: 'global' };
+        return { ext: globalScriptLib(), source: 'global' };
     };
     const getScriptTrees = (option) => deep(scriptTreesOf(treesOf(option).ext));
     const replaceScriptTrees = (trees, option) => {
         const { ext, source } = treesOf(option);
-        if (source === 'global') throw new Error('轻酒馆没有全局脚本库，脚本只能放在角色卡或预设里');
         helperVariablesOf(ext, true);
         ext.tavern_helper.scripts = deep(trees ?? []);
         persistSource(source);
@@ -1008,7 +1017,7 @@ export function createScriptApi(rt) {
         getChatMessages, setChatMessages, setChatMessage, createChatMessages, deleteChatMessages, rotateChatMessages, getLastMessageId, substitudeMacros,
         retrieveDisplayedMessage, formatAsDisplayedMessage, refreshOneMessage,
         // 生成
-        generate, generateRaw, getModelList, stopGenerationById: stopScriptGeneration, stopAllGeneration: stopAllScriptGeneration,
+        generate, generateRaw, stopGenerationById: stopScriptGeneration, stopAllGeneration: stopAllScriptGeneration,
         builtin_prompt_default_order: [...RAW_PROMPT_ORDER], placeholder_prompt_default_order: [...RAW_PROMPT_ORDER],
         // 全局、注入、宏
         initializeGlobal, waitGlobalInitialized, injectPrompts, uninjectPrompts, registerMacroLike, unregisterMacroLike,
@@ -1033,6 +1042,9 @@ export function createScriptApi(rt) {
         getTavernHelperExtensionId: () => 'JS-Slash-Runner', isAdmin: () => true,
     };
 
+    // 补齐的那一批（音频、旧版世界书、用户设定、新建 / 删除角色卡、一键导入、扩展管理、模型列表）
+    Object.assign(helper, createMoreApi(helper));
+
     /** 这个脚本看到的 SillyTavern：页面共用的上下文，事件监听换成记在这个脚本名下的 */
     const context = () => {
         const base = buildContext();
@@ -1051,6 +1063,38 @@ export function createScriptApi(rt) {
     const SillyTavern = () => { const c = context(); return { ...c, getContext: context, libs: { lodash: _, DOMPurify: window.DOMPurify, showdown: window.showdown } }; };
 
     return { helper, Mvu, SillyTavern, eventClearAll };
+}
+
+/** 脚本登记的助手宏应用到一段文字上。context = {message_id?, role?}；某个宏出错就跳过它 */
+export function applyMacroLikes(text, context = {}) {
+    if (!macroLikes.length || typeof text !== 'string' || !text) return text;
+    let out = text;
+    for (const m of [...macroLikes]) {
+        try {
+            m.regex.lastIndex = 0;
+            out = out.replace(m.regex, (sub, ...args) => {
+                const r = m.replace(context, sub, ...args);
+                return r === undefined || r === null ? '' : String(r);
+            });
+        } catch (e) {
+            console.warn('[助手宏] 替换出错', m.regex, e);
+        }
+    }
+    return out;
+}
+
+/** 提示词发出去之前：每条消息都过一遍助手宏（和酒馆助手一样按消息的 role 给上下文） */
+export function applyMacroLikesToMessages(messages) {
+    if (!macroLikes.length) return messages;
+    for (const msg of messages ?? []) {
+        if (typeof msg?.content === 'string') msg.content = applyMacroLikes(msg.content, { role: msg.role });
+    }
+    return messages;
+}
+
+/** 脚本停掉时把它登记的助手宏一起撤掉 */
+export function dropMacroLikesOf(owner) {
+    for (let i = macroLikes.length - 1; i >= 0; i--) if (macroLikes[i].owner === owner) macroLikes.splice(i, 1);
 }
 
 /** 页面级的接口：挂到 window 上，供 window.parent.TavernHelper / window.parent.SillyTavern 这种写法使用 */

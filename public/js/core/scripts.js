@@ -126,6 +126,8 @@ export const DEFAULT_SCRIPT_SETTINGS = {
     enabled: true, // 总开关
     characters: {}, // 角色卡 id → false 表示这张卡的脚本不运行（默认运行）
     presets: {}, // 预设名 → false 表示这个预设的脚本不运行
+    globalEnabled: true, // 全局脚本库整体开关
+    global: { tavern_helper: { scripts: [], variables: {} } }, // 全局脚本库：所有角色、所有预设下都运行（酒馆助手的“全局脚本”）
 };
 
 export function scriptSettings(settings) {
@@ -134,12 +136,14 @@ export function scriptSettings(settings) {
         enabled: s?.enabled !== false,
         characters: s?.characters && typeof s.characters === 'object' ? s.characters : {},
         presets: s?.presets && typeof s.presets === 'object' ? s.presets : {},
+        globalEnabled: s?.globalEnabled !== false,
+        global: s?.global && typeof s.global === 'object' ? s.global : null,
     };
 }
 
 /**
  * 现在应该在运行的脚本。
- * @returns {Array<{key: string, source: 'character'|'preset', owner: string, script: object, raw: object, mvuLoader: boolean}>}
+ * @returns {Array<{key: string, source: 'global'|'character'|'preset', owner: string, script: object, raw: object, mvuLoader: boolean}>}
  */
 export function activeScripts({ card, cardId, preset, presetName, settings }) {
     const cfg = scriptSettings(settings);
@@ -156,6 +160,7 @@ export function activeScripts({ card, cardId, preset, presetName, settings }) {
             });
         }
     };
+    if (cfg.global && cfg.globalEnabled) add('global', 'global', cfg.global);
     if (preset && presetName && cfg.presets[presetName] !== false) add('preset', presetName, preset.extensions);
     if (card && cardId && cfg.characters[cardId] !== false) add('character', cardId, card.data?.extensions);
     return out;

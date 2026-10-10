@@ -6,9 +6,10 @@ import fs from 'node:fs';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { exec } from 'node:child_process';
-import { Router, HttpError, sendJson, sendText, readBody, readJson, serveFile, safeJoin } from './server/http.mjs';
+import { Router, HttpError, sendJson, sendText, readBody, readJson, serveFile, safeJoin, notModified } from './server/http.mjs';
 import { Store, sanitizeName, defaultAvatar } from './server/store.mjs';
 import { proxyRequest } from './server/proxy.mjs';
+import { GenJobs } from './server/gen-jobs.mjs';
 import { detectStDirs, scanStDir, importFromSt } from './server/st-import.mjs';
 import { registerStCompat, registerVectorApi, VectorStore, serveExtensionFile, csrfToken, EXT_URL_PREFIX } from './server/st-compat.mjs';
 import { flattenScriptTrees, scriptTreesOf } from './public/js/core/scripts.js';
@@ -45,6 +46,8 @@ const config = {
     open: !!args.open,
     // 酒馆第三方插件目录（每个子目录一个插件，和酒馆的 public/scripts/extensions/third-party 一样）；可以直接指向酒馆那份
     extDir: '',
+    // 服务器代生成：生成完成后等页面确认多久（毫秒），过了就由服务器自己写进聊天
+    genGraceMs: Math.max(1000, Number(args['gen-grace'] ?? process.env.LT_GEN_GRACE_MS ?? 15000) || 15000),
 };
 config.extDir = path.resolve(String(args['extensions-dir'] ?? process.env.LT_EXTENSIONS ?? path.join(config.data, 'extensions')));
 
@@ -62,6 +65,7 @@ try {
     process.exit(1);
 }
 const router = new Router();
+const genJobs = new GenJobs(store, { graceMs: config.genGraceMs });
 const sessionToken = config.password ? crypto.createHash('sha256').update(`${config.password}|${config.data}`).digest('hex') : '';
 
 function isAuthed(req) {
@@ -73,7 +77,7 @@ function isAuthed(req) {
 }
 
 // ---------- 状态 ----------
-router.get('/api/ping', async () => ({ ok: true, version: '0.1.0', protocol: CLIENT_PROTOCOL, data: config.data, shared: store.stData, auth: !!config.password }));
+router.get('/api/ping', async () => ({ ok: true, version: '0.1.0', protocol: CLIENT_PROTOCOL, data: config.data, shared: store.stData, auth: !!config.password, genJobs: true, genGraceMs: config.genGraceMs }));
 
 router.post('/api/login', async (req, res) => {
     const { password } = await readJson(req);
@@ -103,7 +107,9 @@ router.put('/api/secrets/:id', async (req, res, { id }) => {
 // ---------- 角色卡 ----------
 router.get('/api/characters', async () => store.listCharacters());
 router.get('/api/characters/:file', async (req, res, { file }) => {
-    res.setHeader('X-Version', await store.versionOf('characters', file));
+    const v = await store.versionOf('characters', file);
+    res.setHeader('X-Version', v);
+    if (notModified(req, res, v)) return undefined;
     return store.readCard(file);
 });
 router.get('/api/characters/:file/avatar', async (req, res, { file }) => {
@@ -171,16 +177,40 @@ router.get('/api/chats/:char', async (req, res, { char }) => store.listChats(cha
 router.get('/api/chats/:char/:name', async (req, res, { char, name }) => {
     // 先取版本号再读内容：中间要是被别处改了，前端拿到的版本号偏旧，下次保存会被拦下来（宁可多问一次）
     const version = await store.chatVersion(char, name);
-    const text = await store.readChat(char, name);
     res.setHeader('X-Version', version);
+    if (notModified(req, res, version)) return undefined;
+    const text = await store.readChat(char, name);
     sendText(res, 200, text, 'application/jsonl; charset=utf-8');
     return undefined;
 });
+/**
+ * 写聊天都在这个聊天的写入锁里做（服务器代写回复也用这把锁）。带 X-LT-Gen-Job 的保存同时是对那次代生成的确认：
+ * 服务器已经替页面写过了就拒绝（409 gen-persisted），写成功了服务器就不会再写。
+ */
+async function chatWrite(req, char, name, fn) {
+    const jobId = String(req.headers['x-lt-gen-job'] ?? '');
+    return store.withChatLock(char, name, async () => {
+        const job = jobId ? genJobs.beforeClientSave(jobId) : null;
+        let ok = false;
+        try {
+            const out = await fn();
+            ok = true;
+            return out;
+        } finally {
+            genJobs.afterClientSave(job, ok);
+        }
+    });
+}
 router.put('/api/chats/:char/:name', async (req, res, { char, name }) => {
     const text = (await readBody(req)).toString('utf8');
     const first = text.slice(0, text.indexOf('\n') > 0 ? text.indexOf('\n') : undefined);
     try { JSON.parse(first); } catch { throw new HttpError(400, '聊天格式不对'); }
-    const version = await store.saveChat(char, name, text, writeCheck(req));
+    const version = await chatWrite(req, char, name, () => store.saveChat(char, name, text, writeCheck(req)));
+    return { ok: true, version };
+});
+router.patch('/api/chats/:char/:name', async (req, res, { char, name }) => {
+    const patch = await readJson(req);
+    const version = await chatWrite(req, char, name, () => store.patchChat(char, name, patch, { expect: String(req.headers['x-expect'] ?? '') }));
     return { ok: true, version };
 });
 router.post('/api/chats/:char/:name/rename', async (req, res, { char, name }) => {
@@ -197,7 +227,9 @@ router.delete('/api/chats/:char/:name', async (req, res, { char, name }) => {
 for (const kind of ['presets', 'worlds']) {
     router.get(`/api/${kind}`, async () => store.listJson(kind));
     router.get(`/api/${kind}/:name`, async (req, res, { name }) => {
-        res.setHeader('X-Version', await store.versionOf(kind, name));
+        const v = await store.versionOf(kind, name);
+        res.setHeader('X-Version', v);
+        if (notModified(req, res, v)) return undefined;
         return store.readJson(kind, name);
     });
     router.put(`/api/${kind}/:name`, async (req, res, { name }) => {
@@ -233,6 +265,22 @@ router.post('/api/llm/:conn', async (req, res, { conn }) => {
     return undefined;
 });
 
+// ---------- 服务器代生成（见 server/gen-jobs.mjs） ----------
+router.post('/api/gen', async (req) => genJobs.create(await readJson(req)));
+router.get('/api/gen/active', async (req) => {
+    const url = new URL(req.url, 'http://x');
+    return genJobs.active(url.searchParams.get('char') ?? '', url.searchParams.get('chat') ?? '');
+});
+router.get('/api/gen/:id', async (req, res, { id }) => genJobs.summary(genJobs.mustGet(id)));
+router.get('/api/gen/:id/events', async (req, res, { id }) => {
+    const after = Number(new URL(req.url, 'http://x').searchParams.get('after') ?? 0) || 0;
+    genJobs.subscribe(id, after, req, res);
+    return undefined;
+});
+router.post('/api/gen/:id/abort', async (req, res, { id }) => genJobs.cancel(id));
+router.post('/api/gen/:id/claim', async (req, res, { id }) => genJobs.claim(id));
+router.post('/api/gen/:id/ack', async (req, res, { id }) => genJobs.ack(id));
+
 // ---------- 酒馆插件兼容接口 ----------
 registerStCompat(router, store, { extDir: config.extDir });
 // 向量存在轻酒馆自己的数据目录里（不和酒馆共用：酒馆那边的插件把向量放在浏览器里）
@@ -251,7 +299,7 @@ const server = http.createServer(async (req, res) => {
         if (pathname.startsWith('/api/')) {
             if (pathname !== '/api/login' && pathname !== '/api/ping' && !isAuthed(req)) throw new HttpError(401, '需要登录');
             // 酒馆插件调的兼容接口不带轻酒馆的版本头，放行（世界书写入走插件自己的整本覆盖，和酒馆行为一致）
-            const readOnlyCompat = pathname.startsWith('/api/backends/') || pathname.startsWith('/api/vector/') || pathname === '/api/settings/get' || pathname.startsWith('/api/worldinfo/');
+            const readOnlyCompat = pathname.startsWith('/api/backends/') || pathname.startsWith('/api/vector/') || pathname === '/api/settings/get' || pathname.startsWith('/api/worldinfo/') || pathname.startsWith('/api/extensions/');
             const writes = req.method !== 'GET' && req.method !== 'HEAD' && pathname !== '/api/login' && !pathname.startsWith('/api/llm/') && !readOnlyCompat;
             if (writes && req.headers['x-lt-client'] !== CLIENT_PROTOCOL) {
                 throw new HttpError(409, '页面是旧版本，请刷新页面后再操作（这次没有保存）', 'stale-client');
@@ -274,7 +322,9 @@ const server = http.createServer(async (req, res) => {
         const rel = pathname === '/' ? '/index.html' : pathname;
         const file = safeJoin(PUBLIC, rel);
         if (!file) throw new HttpError(400, 'Bad path');
-        serveFile(req, res, file, { cache: rel.startsWith('/vendor/') ? 'public, max-age=86400' : 'no-cache' });
+        // 首页每次都取新的；带 ?v= 的（入口脚本、前端卡运行时）随版本号长期缓存；其余靠 ETag 协商
+        const versioned = new URL(req.url, 'http://x').searchParams.has('v');
+        serveFile(req, res, file, { cache: rel === '/index.html' ? 'no-store' : versioned ? 'public, max-age=31536000, immutable' : rel.startsWith('/vendor/') ? 'public, max-age=86400' : 'no-cache' });
     } catch (e) {
         const status = e.status ?? 500;
         if (status >= 500) console.error(e);

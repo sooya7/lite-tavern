@@ -67,16 +67,98 @@ function stripMeta(messages) {
  * @param {{messages: object[], prefill?: string, params: object, names?: object}} req
  * @returns {{path: string, method: string, body: object, stream: boolean}}
  */
-export function buildRequest(conn, { messages, prefill = '', params, names }) {
-    const stream = conn.stream === undefined ? params.stream : !!conn.stream;
+export function buildRequest(conn, { messages, prefill = '', params, names, images = [], tools = null, toolChoice = null, jsonSchema = null }) {
+    let stream = conn.stream === undefined ? params.stream : !!conn.stream;
+    // 工具调用 / 结构化输出一律不用流式：结果要整块拿到再解析
+    if ((Array.isArray(tools) && tools.length) || jsonSchema) stream = false;
     let extra = {};
     if (conn.extraBody) {
         try { extra = typeof conn.extraBody === 'string' ? JSON.parse(conn.extraBody) : conn.extraBody; } catch { extra = {}; }
     }
+    const opt = { images: (images ?? []).filter(Boolean), tools: Array.isArray(tools) && tools.length ? tools : null, toolChoice, jsonSchema };
+    let out;
     switch (conn.provider) {
-        case 'claude': return { ...buildClaude(conn, messages, prefill, params, names, stream, extra), method: 'POST', stream };
-        case 'gemini': return { ...buildGemini(conn, messages, prefill, params, stream, extra), method: 'POST', stream };
-        default: return { ...buildOpenAI(conn, messages, prefill, params, names, stream, extra), method: 'POST', stream };
+        case 'claude': out = buildClaude(conn, messages, prefill, params, names, stream, extra); addClaudeExtras(out.body, opt); break;
+        case 'gemini': out = buildGemini(conn, messages, prefill, params, stream, extra); addGeminiExtras(out.body, opt); break;
+        default: out = buildOpenAI(conn, messages, prefill, params, names, stream, extra); addOpenAIExtras(out.body, opt);
+    }
+    return { ...out, method: 'POST', stream };
+}
+
+// ---------- 图片输入、工具调用、结构化输出（酒馆助手 generate 的 image / tools / json_schema） ----------
+
+/** data:image/png;base64,xxx → {mime, data}；不是 data URL 返回 null */
+function parseDataUrl(url) {
+    const m = String(url).match(/^data:([^;,]+)?(;base64)?,(.*)$/s);
+    if (!m) return null;
+    return { mime: m[1] || 'image/png', data: m[2] ? m[3] : btoa(unescape(decodeURIComponent(m[3]))) };
+}
+
+const lastIndexOf = (list, pred) => { for (let i = list.length - 1; i >= 0; i--) if (pred(list[i])) return i; return -1; };
+
+function addOpenAIExtras(body, { images, tools, toolChoice, jsonSchema }) {
+    if (images.length) {
+        let i = lastIndexOf(body.messages, m => m.role === 'user');
+        if (i < 0) { body.messages.push({ role: 'user', content: '' }); i = body.messages.length - 1; }
+        const m = body.messages[i];
+        const text = typeof m.content === 'string' ? m.content : '';
+        m.content = [...(text ? [{ type: 'text', text }] : []), ...images.map(url => ({ type: 'image_url', image_url: { url } }))];
+    }
+    if (tools) {
+        body.tools = tools;
+        if (toolChoice) body.tool_choice = toolChoice === 'any' ? 'required' : toolChoice;
+    }
+    if (jsonSchema) {
+        body.response_format = { type: 'json_schema', json_schema: { name: jsonSchema.name || 'output', ...(jsonSchema.description ? { description: jsonSchema.description } : {}), schema: jsonSchema.value ?? {}, strict: jsonSchema.strict !== false } };
+    }
+}
+
+function claudeToolChoice(c) {
+    if (!c || c === 'auto') return { type: 'auto' };
+    if (c === 'required' || c === 'any') return { type: 'any' };
+    if (c === 'none') return { type: 'none' };
+    if (typeof c === 'object' && c.function?.name) return { type: 'tool', name: c.function.name };
+    return { type: 'auto' };
+}
+
+function addClaudeExtras(body, { images, tools, toolChoice, jsonSchema }) {
+    if (images.length) {
+        let i = lastIndexOf(body.messages, m => m.role === 'user');
+        if (i < 0) { body.messages.push({ role: 'user', content: [] }); i = body.messages.length - 1; }
+        const blocks = images.map(url => {
+            const d = parseDataUrl(url);
+            return d ? { type: 'image', source: { type: 'base64', media_type: d.mime, data: d.data } } : { type: 'image', source: { type: 'url', url } };
+        });
+        body.messages[i].content = [...blocks, ...body.messages[i].content];
+    }
+    if (jsonSchema) {
+        // Claude 没有 response_format：做成一个强制调用的工具，结果取工具参数
+        const name = jsonSchema.name || 'output';
+        body.tools = [{ name, ...(jsonSchema.description ? { description: jsonSchema.description } : {}), input_schema: jsonSchema.value ?? { type: 'object' } }];
+        body.tool_choice = { type: 'tool', name };
+        if (body.thinking) delete body.thinking; // 强制工具调用和思考不能同时开
+    } else if (tools) {
+        body.tools = tools.map(t => ({ name: t.function?.name, ...(t.function?.description ? { description: t.function.description } : {}), input_schema: t.function?.parameters ?? { type: 'object', properties: {} } }));
+        body.tool_choice = claudeToolChoice(toolChoice);
+    }
+}
+
+function addGeminiExtras(body, { images, tools, toolChoice, jsonSchema }) {
+    if (images.length) {
+        let i = lastIndexOf(body.contents, c => c.role === 'user');
+        if (i < 0) { body.contents.push({ role: 'user', parts: [] }); i = body.contents.length - 1; }
+        for (const url of images) {
+            const d = parseDataUrl(url);
+            body.contents[i].parts.push(d ? { inlineData: { mimeType: d.mime, data: d.data } } : { fileData: { fileUri: url, mimeType: 'image/*' } });
+        }
+    }
+    if (jsonSchema) {
+        body.generationConfig.responseMimeType = 'application/json';
+        body.generationConfig.responseJsonSchema = jsonSchema.value ?? { type: 'object' };
+    } else if (tools) {
+        body.tools = [{ functionDeclarations: tools.map(t => ({ name: t.function?.name, ...(t.function?.description ? { description: t.function.description } : {}), ...(t.function?.parameters ? { parameters: t.function.parameters } : {}) })) }];
+        const mode = toolChoice === 'none' ? 'NONE' : (toolChoice === 'required' || toolChoice === 'any' || (toolChoice && typeof toolChoice === 'object')) ? 'ANY' : 'AUTO';
+        body.toolConfig = { functionCallingConfig: { mode, ...(typeof toolChoice === 'object' && toolChoice?.function?.name ? { allowedFunctionNames: [toolChoice.function.name] } : {}) } };
     }
 }
 
@@ -287,28 +369,39 @@ export function parseStreamEvent(provider, ev) {
     };
 }
 
-/** 非流式响应 → {text, reasoning} */
+/** 非流式响应 → {text, reasoning, toolCalls} */
 export function parseFullResponse(provider, j) {
     if (j?.error) throw new Error(j.error.message ?? JSON.stringify(j.error));
     if (provider === 'claude') {
         let text = '', reasoning = '';
+        const toolCalls = [];
         for (const b of j.content ?? []) {
             if (b.type === 'text') text += b.text;
             if (b.type === 'thinking') reasoning += b.thinking;
+            if (b.type === 'tool_use') toolCalls.push({ id: String(b.id ?? ''), type: 'function', function: { name: String(b.name ?? ''), arguments: JSON.stringify(b.input ?? {}) } });
         }
-        return { text, reasoning };
+        return { text, reasoning, toolCalls };
     }
     if (provider === 'gemini') {
         const cand = j.candidates?.[0];
         if (!cand) throw new Error(j.promptFeedback?.blockReason ? `Gemini 拒绝了请求：${j.promptFeedback.blockReason}` : 'Gemini 没有返回内容');
         let text = '', reasoning = '';
+        const toolCalls = [];
         for (const p of cand.content?.parts ?? []) {
+            if (p.functionCall) {
+                toolCalls.push({ id: String(p.functionCall.id ?? `call_${toolCalls.length}`), type: 'function', function: { name: String(p.functionCall.name ?? ''), arguments: JSON.stringify(p.functionCall.args ?? {}) }, ...(p.thoughtSignature ? { thought_signature: p.thoughtSignature } : {}) });
+                continue;
+            }
             if (p.thought) reasoning += p.text ?? ''; else text += p.text ?? '';
         }
-        return { text, reasoning };
+        return { text, reasoning, toolCalls };
     }
     const m = j.choices?.[0]?.message ?? {};
-    return { text: m.content ?? j.choices?.[0]?.text ?? '', reasoning: m.reasoning_content ?? m.reasoning ?? '' };
+    const toolCalls = (Array.isArray(m.tool_calls) ? m.tool_calls : []).map((t, i) => ({
+        id: String(t.id ?? `call_${i}`), type: 'function',
+        function: { name: String(t.function?.name ?? ''), arguments: typeof t.function?.arguments === 'string' ? t.function.arguments : JSON.stringify(t.function?.arguments ?? {}) },
+    }));
+    return { text: m.content ?? j.choices?.[0]?.text ?? '', reasoning: m.reasoning_content ?? m.reasoning ?? '', toolCalls };
 }
 
 /**

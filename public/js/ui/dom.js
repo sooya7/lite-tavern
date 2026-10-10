@@ -106,12 +106,15 @@ export function iconBtn(name, title, onClick, cls = '') {
 }
 
 // ---------- 提示 ----------
-export function toast(message, type = 'info', ms = 3200) {
+export function toast(message, type = 'info', ms = 3200, { action } = {}) {
     const root = document.getElementById('toasts');
     const el = h('div', { class: `toast ${type}`, role: type === 'error' ? 'alert' : 'status' }, h('div', { class: 'grow' }, message));
+    // 带一个按钮（比如“撤销”）：点按钮执行，点别处只是关掉
+    if (action) el.append(h('button', { class: 'btn small toast-action', type: 'button', onclick: (e) => { e.stopPropagation(); el.remove(); action.onClick?.(); } }, action.label));
     el.addEventListener('click', () => el.remove());
     root.append(el);
     setTimeout(() => el.remove(), type === 'error' ? Math.max(ms, 6000) : ms);
+    return el;
 }
 
 // ---------- 弹窗 ----------
