@@ -24,14 +24,17 @@ command -v rclone >/dev/null 2>&1 || die "没有 rclone"
 [[ -f "$RCLONE_CONFIG" ]] || die "找不到 rclone 配置 $RCLONE_CONFIG"
 [[ -d "$LT_DATA" ]] || die "找不到轻酒馆数据目录 $LT_DATA"
 [[ "$LOCAL_KEEP" =~ ^[1-9][0-9]*$ && "$REMOTE_KEEP" =~ ^[1-9][0-9]*$ ]] || die "保留份数必须是正整数"
-# 代理坏的时候连接会挂着不动：连不上 20 秒、没数据 2 分钟就放弃这一次，交给外面的重试
-RCLONE=(rclone --config "$RCLONE_CONFIG" --contimeout 20s --timeout 2m)
+# 代理坏的时候连接会挂着不动：连不上 20 秒、没数据 2 分钟就放弃这一次，交给外面的重试。
+# --drive-upload-cutoff 1G：归档用一次请求传完，不分块。这个 rclone 远端用的是 rclone 自带的公共 client_id，
+# Google 按分钟限流（403 Quota exceeded）；分块上传时限流正好卡在最后一块的提交上，重试 10 次不过就整份重传，
+# 一百多 MB 怎么也传不完。一次请求的话限流只发生在开头，等几秒重试，放行后就能一口气传完。
+RCLONE=(rclone --config "$RCLONE_CONFIG" --contimeout 20s --timeout 2m --drive-upload-cutoff 1G)
 
 retry() {
   local n=1
   until "$@"; do
     (( n >= TRIES )) && return 1
-    log "第 $n 次没成功，${TRY_SLEEP} 秒后重试（rclone ${8:-}）"
+    log "第 $n 次没成功，${TRY_SLEEP} 秒后重试（rclone ${10:-}）"
     sleep "$TRY_SLEEP"
     n=$((n + 1))
   done
@@ -104,7 +107,7 @@ done
 
 log "上传到 $REMOTE_ROOT"
 retry "${RCLONE[@]}" mkdir "$REMOTE_ROOT" || die "连不上 Google Drive"
-retry "${RCLONE[@]}" copyto "$ARCHIVE" "$REMOTE_ROOT/$BASE" --retries 3 --low-level-retries 10 \
+retry "${RCLONE[@]}" copyto "$ARCHIVE" "$REMOTE_ROOT/$BASE" --retries 2 --low-level-retries 20 \
   || die "上传失败（本地归档留在 $ARCHIVE）"
 retry "${RCLONE[@]}" copyto "$ARCHIVE.sha256" "$REMOTE_ROOT/$BASE.sha256" --retries 3 --low-level-retries 10 \
   || die "校验文件上传失败"
