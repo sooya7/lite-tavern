@@ -10,6 +10,7 @@ import { Router, HttpError, sendJson, sendText, readBody, readJson, serveFile, s
 import { Store, sanitizeName, defaultAvatar } from './server/store.mjs';
 import { proxyRequest } from './server/proxy.mjs';
 import { detectStDirs, scanStDir, importFromSt } from './server/st-import.mjs';
+import { flattenScriptTrees, scriptTreesOf } from './public/js/core/scripts.js';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.join(ROOT, 'public');
@@ -113,7 +114,9 @@ router.post('/api/characters/import', async (req) => {
     const name = decodeURIComponent(String(req.headers['x-file-name'] ?? 'card'));
     const bytes = await readBody(req);
     const { file, card, world } = await store.importCard(bytes, name);
-    return { file, name: card.data.name, world };
+    // 卡里自带了什么，导入完告诉界面一声（世界书已另存并绑定；脚本、正则留在卡里，打开这张卡就生效）
+    const scripts = flattenScriptTrees(scriptTreesOf(card.data.extensions));
+    return { file, name: card.data.name, world, scripts: scripts.length, scriptsOn: scripts.filter(x => x.on).length, regex: card.data.extensions?.regex_scripts?.length ?? 0 };
 });
 router.post('/api/characters/create', async (req) => {
     const card = await readJson(req);

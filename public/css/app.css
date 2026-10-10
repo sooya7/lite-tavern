@@ -715,3 +715,28 @@ a { color: var(--accent); }
     font-family: var(--font-read); font-size: 20px; color: var(--accent); pointer-events: none;
 }
 .list-item .switch { margin-left: 2px; }
+
+/* ---------- 酒馆助手脚本 ---------- */
+/* 脚本跑在看不见的 iframe 里；用零尺寸而不是 display:none，后者在有的浏览器里会让 iframe 里量不到样式 */
+#lt-script-frames { position: absolute; width: 0; height: 0; overflow: hidden; pointer-events: none; }
+.lt-script-frame { width: 0; height: 0; border: 0; position: absolute; visibility: hidden; }
+/* 输入框上方的脚本按钮：一行放不下就横向滑 */
+.script-buttons { max-width: var(--chat-width); margin: 0 auto 8px; padding: 0 2px; display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; }
+.script-buttons::-webkit-scrollbar { display: none; }
+.script-buttons[hidden] { display: none; }
+.script-btn { flex: none; padding: 5px 12px; border: 1px solid var(--line-2); border-radius: 999px; background: var(--surface); color: var(--text-2); font: inherit; font-size: 13px; line-height: 1.4; cursor: pointer; white-space: nowrap; }
+.script-btn:hover { border-color: var(--line-3); color: var(--text); }
+.center.home .script-buttons { display: none; }
+/* 设置 › 角色 › 脚本 */
+.script-row { display: flex; align-items: flex-start; gap: 10px; padding: 9px 0; border-top: 1px solid var(--line); }
+.script-row:first-of-type { border-top: 0; }
+.script-row .script-main { flex: 1; min-width: 0; }
+.script-row .script-name { font-size: 14px; overflow-wrap: anywhere; }
+.script-row .script-meta { font-size: 12px; color: var(--muted); margin-top: 2px; overflow-wrap: anywhere; }
+.script-row .script-err { font-size: 12px; color: var(--danger); margin-top: 4px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.script-row .script-info { font-size: 12px; color: var(--muted); margin-top: 4px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 9em; overflow: auto; }
+.script-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); flex: none; margin-top: 7px; }
+.script-dot.running { background: var(--ok); }
+.script-dot.error { background: var(--danger); }
+.script-dot.loading { background: var(--warn); }
+.script-popup { overflow-wrap: anywhere; }

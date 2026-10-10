@@ -1,0 +1,190 @@
+{
+ "spec": "chara_card_v2",
+ "spec_version": "2.0",
+ "data": {
+  "name": "脚本测试卡",
+  "description": "{{char}}是用来测试酒馆助手脚本的角色。",
+  "personality": "",
+  "scenario": "",
+  "first_mes": "*{{char}}看着你*\"脚本都跑起来了吗？\"",
+  "mes_example": "",
+  "creator_notes": "端到端测试用卡：自带世界书、正则、酒馆助手脚本",
+  "system_prompt": "",
+  "post_history_instructions": "",
+  "alternate_greetings": [],
+  "tags": [
+   "测试"
+  ],
+  "creator": "lite-tavern",
+  "character_version": "1.0",
+  "character_book": {
+   "name": "脚本卡的书",
+   "entries": [
+    {
+     "id": 0,
+     "keys": [],
+     "comment": "[initvar]初始变量",
+     "content": "好感度: 10\n地点: 门口\n",
+     "constant": false,
+     "enabled": false,
+     "insertion_order": 100,
+     "position": "after_char",
+     "extensions": {}
+    },
+    {
+     "id": 1,
+     "keys": [],
+     "comment": "脚本卡常驻",
+     "content": "这是脚本卡自带世界书里的常驻条目。",
+     "constant": true,
+     "enabled": true,
+     "insertion_order": 50,
+     "position": "after_char",
+     "extensions": {}
+    }
+   ]
+  },
+  "extensions": {
+   "talkativeness": "0.5",
+   "fav": false,
+   "regex_scripts": [
+    {
+     "id": "e2e-status-bar",
+     "scriptName": "状态栏",
+     "findRegex": "<StatusPlaceHolderImpl/>",
+     "replaceString": "【状态栏占位】",
+     "trimStrings": [],
+     "placement": [
+      2
+     ],
+     "disabled": false,
+     "markdownOnly": true,
+     "promptOnly": false,
+     "runOnEdit": true,
+     "substituteRegex": 0,
+     "minDepth": null,
+     "maxDepth": null
+    }
+   ],
+   "tavern_helper": {
+    "scripts": [
+     {
+      "type": "script",
+      "enabled": true,
+      "name": "MVU",
+      "id": "e2e-mvu",
+      "content": "import 'https://testingcf.jsdelivr.net/gh/MagicalAstrogy/MagVarUpdate/artifact/bundle.js';",
+      "info": "",
+      "button": {
+       "enabled": true,
+       "buttons": []
+      },
+      "data": {},
+      "export_with": {
+       "data": true,
+       "button": true
+      }
+     },
+     {
+      "type": "script",
+      "enabled": true,
+      "name": "变量结构",
+      "id": "e2e-schema",
+      "content": "import { registerMvuSchema } from 'https://testingcf.jsdelivr.net/gh/StageDog/tavern_resource/dist/util/mvu_zod.js';\n\nexport const Schema = z.object({\n  好感度: z.coerce.number().transform(v => _.clamp(v, 0, 12)),\n  地点: z.string(),\n  结构默认: z.string().prefault('已补'),\n});\n\n$(() => {\n  registerMvuSchema(Schema);\n});\n",
+      "info": "用 zod 定义变量结构：好感度不超过 12",
+      "button": {
+       "enabled": true,
+       "buttons": []
+      },
+      "data": {},
+      "export_with": {
+       "data": true,
+       "button": true
+      }
+     },
+     {
+      "type": "folder",
+      "enabled": true,
+      "name": "界面",
+      "id": "e2e-folder",
+      "icon": "fa-solid fa-folder",
+      "color": "#c96442",
+      "scripts": [
+       {
+        "type": "script",
+        "enabled": true,
+        "name": "悬浮状态栏",
+        "id": "e2e-float",
+        "content": "// 悬浮状态栏：往页面上加一个悬浮窗，登记两个按钮，监听变量更新\nconst $box = $('<div id=\"e2e-float\" style=\"position:fixed;right:12px;bottom:140px;z-index:50;padding:6px 10px;border-radius:8px;background:var(--SmartThemeBlurTintColor);border:1px solid var(--SmartThemeBorderColor);color:var(--SmartThemeBodyColor)\">悬浮窗</div>').appendTo('body');\nconst extra = window.parent.document.createElement('div');\nextra.id = 'e2e-parent-el';\nwindow.parent.document.body.appendChild(extra);\nwindow.parent.__e2eGlobal = 'set-by-script';\n\nconst show = () => {\n  const data = Mvu.getMvuData({ type: 'message', message_id: 'latest' });\n  $box.text(`好感度 ${_.get(data, 'stat_data.好感度')} · ${SillyTavern.name2} · 共 ${getLastMessageId() + 1} 楼`);\n};\nawait waitGlobalInitialized('Mvu');\nshow();\neventOn(tavern_events.MESSAGE_RECEIVED, show);\neventOn(tavern_events.CHAT_CHANGED, show);\neventOn(Mvu.events.VARIABLE_UPDATE_ENDED, (variables, before) => {\n  variables.stat_data.脚本计数 = (_.get(before, 'stat_data.脚本计数') ?? 0) + 1;\n});\n\nappendInexistentScriptButtons([{ name: '打招呼', visible: true }, { name: '问模型', visible: true }, { name: '隐藏的', visible: false }]);\neventOn(getButtonEvent('打招呼'), async () => {\n  const n = (getVariables({ type: 'script' }).clicks ?? 0) + 1;\n  replaceVariables({ clicks: n }, { type: 'script' });\n  await createChatMessages([{ role: 'assistant', message: `脚本打招呼第 ${n} 次` }]);\n  show();\n});\neventOn(getButtonEvent('问模型'), async () => {\n  const text = await generateRaw({ user_input: '脚本提问', ordered_prompts: [{ role: 'system', content: '系统：{{char}}' }, 'user_input'], should_silence: true });\n  $box.attr('data-gen', text);\n});\n",
+        "info": "",
+        "button": {
+         "enabled": true,
+         "buttons": []
+        },
+        "data": {},
+        "export_with": {
+         "data": true,
+         "button": true
+        }
+       },
+       {
+        "type": "script",
+        "enabled": true,
+        "name": "自己清理的脚本",
+        "id": "e2e-self",
+        "content": "$('body').append('<div id=\"e2e-self-clean\" hidden>自己清理</div>');\n$(window).on('pagehide', () => { $('#e2e-self-clean').remove(); });\n",
+        "info": "",
+        "button": {
+         "enabled": true,
+         "buttons": []
+        },
+        "data": {},
+        "export_with": {
+         "data": true,
+         "button": true
+        }
+       }
+      ]
+     },
+     {
+      "type": "script",
+      "enabled": false,
+      "name": "关着的脚本",
+      "id": "e2e-off",
+      "content": "window.parent.__e2eDisabled = true;",
+      "info": "",
+      "button": {
+       "enabled": true,
+       "buttons": []
+      },
+      "data": {},
+      "export_with": {
+       "data": true,
+       "button": true
+      }
+     },
+     {
+      "type": "script",
+      "enabled": true,
+      "name": "出错的脚本",
+      "id": "e2e-bad",
+      "content": "throw new Error('故意出错');",
+      "info": "",
+      "button": {
+       "enabled": true,
+       "buttons": []
+      },
+      "data": {},
+      "export_with": {
+       "data": true,
+       "button": true
+      }
+     }
+    ],
+    "variables": {
+     "角色变量": 1
+    }
+   }
+  }
+ }
+}

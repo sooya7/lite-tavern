@@ -73,7 +73,7 @@ export function renderChat() {
 
 function loadEarlierBtn(label) {
     return h('div', { class: 'load-earlier' },
-        h('button', { class: 'btn small', onclick: () => { renderFrom = Math.max(0, renderFrom - RENDER_WINDOW); rerenderFrom(); } }, label));
+        h('button', { class: 'btn small', onclick: () => { renderFrom = Math.max(0, renderFrom - RENDER_WINDOW); rerenderFrom(); eventSource.emit(event_types.MORE_MESSAGES_LOADED); } }, label));
 }
 
 function rerenderFrom() {
@@ -92,7 +92,8 @@ function buildMessage(i, { streaming = false } = {}) {
     const isLast = i === state.chat.messages.length - 1;
     const user = !!m.is_user;
     const el = h('div', {
-        class: `mes ${user ? 'user' : 'char'} ${m.is_system ? 'hidden-msg' : ''} ${streaming ? 'streaming' : ''} ${isLast ? 'last' : ''}`,
+        // last_mes / swipe_left / swipe_right 是酒馆页面上的类名，角色卡脚本会按它们找元素
+        class: `mes ${user ? 'user' : 'char'} ${m.is_system ? 'hidden-msg' : ''} ${streaming ? 'streaming' : ''} ${isLast ? 'last last_mes' : ''}`,
         mesid: String(i),
         is_user: String(user),
         is_system: String(!!m.is_system),
@@ -117,9 +118,9 @@ function buildMessage(i, { streaming = false } = {}) {
         const swipeCount = Array.isArray(m.swipes) && m.swipes.length ? m.swipes.length : 1;
         if (!m.extra?.type && (isLast || swipeCount > 1)) {
             foot.append(h('div', { class: 'swipes' },
-                iconBtn('left', '上一个', () => swipe(i, -1)),
-                h('span', {}, `${Math.min(m.swipe_id ?? 0, swipeCount - 1) + 1}/${swipeCount}`),
-                iconBtn('right', isLast ? '下一个 / 重新生成' : '下一个', () => swipe(i, 1)),
+                iconBtn('left', '上一个', () => swipe(i, -1), 'swipe_left'),
+                h('span', { class: 'swipes-counter' }, `${Math.min(m.swipe_id ?? 0, swipeCount - 1) + 1}/${swipeCount}`),
+                iconBtn('right', isLast ? '下一个 / 重新生成' : '下一个', () => swipe(i, 1), 'swipe_right'),
             ));
         }
         foot.append(tools);

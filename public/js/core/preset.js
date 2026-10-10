@@ -1,6 +1,7 @@
 // 对话补全（Chat Completion）预设：默认值、规范化、提示词顺序工具。格式与酒馆 "OpenAI Settings/*.json" 一致。
 import { clone, uuid } from './util.js';
 import { normalizeRegexScript } from './regex.js';
+import { scriptsOf } from './scripts.js';
 
 export const PROMPT_ORDER_GLOBAL = 100001;
 export const PROMPT_ORDER_DEFAULT = 100000;
@@ -155,11 +156,5 @@ export function samplerParams(preset) {
     };
 }
 
-/** 预设里可能夹带的酒馆助手脚本（用于检测 MVU 等） */
-export function presetTavernHelperScripts(preset) {
-    const th = preset?.extensions?.tavern_helper;
-    if (!th) return [];
-    if (Array.isArray(th.scripts)) return th.scripts;
-    if (Array.isArray(th)) return th;
-    return [];
-}
+/** 预设里夹带的酒馆助手脚本（文件夹已展开，规范化后的副本） */
+export const presetTavernHelperScripts = (preset) => scriptsOf(preset?.extensions);

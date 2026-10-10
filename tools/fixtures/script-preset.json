@@ -1,0 +1,84 @@
+{
+ "temperature": 0.9,
+ "openai_max_context": 8000,
+ "openai_max_tokens": 300,
+ "stream_openai": true,
+ "prompts": [
+  {
+   "identifier": "main",
+   "name": "Main Prompt",
+   "system_prompt": true,
+   "role": "system",
+   "content": "脚本预设的主提示词。"
+  }
+ ],
+ "prompt_order": [
+  {
+   "character_id": 100001,
+   "order": [
+    {
+     "identifier": "main",
+     "enabled": true
+    },
+    {
+     "identifier": "worldInfoBefore",
+     "enabled": true
+    },
+    {
+     "identifier": "charDescription",
+     "enabled": true
+    },
+    {
+     "identifier": "worldInfoAfter",
+     "enabled": true
+    },
+    {
+     "identifier": "chatHistory",
+     "enabled": true
+    }
+   ]
+  }
+ ],
+ "extensions": {
+  "regex_scripts": [],
+  "tavern_helper": {
+   "scripts": [
+    {
+     "type": "script",
+     "enabled": true,
+     "name": "预设脚本",
+     "id": "e2e-preset-1",
+     "content": "// 预设自带的脚本：发送前给请求加一句、注入一条提示词、在“扩展设置”里放自己的设置界面\n$('body').append('<div id=\"e2e-preset-script\" hidden>预设脚本</div>');\neventOn(tavern_events.CHAT_COMPLETION_SETTINGS_READY, (data) => {\n  data.messages.push({ role: 'system', content: '预设脚本加的一句' });\n});\ninjectPrompts([{ id: 'e2e-inject', position: 'in_chat', depth: 0, role: 'system', content: '注入的提示词' }]);\neventOn(tavern_events.CHAT_CHANGED, () => {\n  injectPrompts([{ id: 'e2e-inject', position: 'in_chat', depth: 0, role: 'system', content: '注入的提示词' }]);\n});\n$('#extensions_settings2').append('<div class=\"inline-drawer\" id=\"e2e-preset-settings\"><div class=\"inline-drawer-toggle inline-drawer-header\"><b>预设脚本设置</b><div class=\"inline-drawer-icon fa-solid fa-circle-chevron-down down\"></div></div><div class=\"inline-drawer-content\"><label class=\"checkbox_label\"><input type=\"checkbox\" id=\"e2e-preset-opt\"><span>预设脚本的选项</span></label></div></div>');\n",
+     "info": "",
+     "button": {
+      "enabled": true,
+      "buttons": []
+     },
+     "data": {},
+     "export_with": {
+      "data": true,
+      "button": true
+     }
+    },
+    {
+     "type": "script",
+     "enabled": false,
+     "name": "预设里关着的脚本",
+     "id": "e2e-preset-off",
+     "content": "window.parent.__e2ePresetOff = true;",
+     "info": "",
+     "button": {
+      "enabled": true,
+      "buttons": []
+     },
+     "data": {},
+     "export_with": {
+      "data": true,
+      "button": true
+     }
+    }
+   ],
+   "variables": {}
+  }
+ }
+}

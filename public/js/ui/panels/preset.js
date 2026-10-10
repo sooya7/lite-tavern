@@ -87,8 +87,7 @@ export function render(body) {
     if (th.length || rx.length) {
         body.append(section('预设自带的扩展内容',
             rx.length ? h('div', { class: 'small' }, `正则脚本 ${rx.length} 条（在「正则」面板里管理）`) : null,
-            th.length ? h('div', { class: 'small' }, `酒馆助手脚本 ${th.length} 个：${th.map(x => x.name).filter(Boolean).slice(0, 6).join('、')}${th.length > 6 ? '…' : ''}`) : null,
-            th.length ? h('div', { class: 'hint' }, '酒馆助手脚本不会原样执行；其中的 MVU 变量更新、前端界面等常用能力已内置兼容。') : null,
+            th.length ? h('div', { class: 'small' }, `酒馆助手脚本 ${th.length} 个（在「脚本」面板里管理）：${th.map(x => x.name).filter(Boolean).slice(0, 6).join('、')}${th.length > 6 ? '…' : ''}`) : null,
         ));
     }
 }

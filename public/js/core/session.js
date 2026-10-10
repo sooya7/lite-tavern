@@ -8,9 +8,10 @@ import { buildChatCompletion, PERSONA_POSITION, EXT_PROMPT_TYPE } from './prompt
 import { createTemplateRuntime, preprocessWorldEntries, classifySpecialEntries } from './template.js';
 import { messageText, isNarrator } from './chat.js';
 import { estimateMessageTokens, estimateTokens } from './tokens.js';
-import { collectInitVars, dumpYaml, detectMvu, processMessage, latestMvuVars, extractUpdateBlocks } from './mvu.js';
-import { cardDepthPrompt, cardRegexScripts, cardTavernHelperScripts, cardLinkedWorld } from './card.js';
+import { collectInitVars, dumpYaml, detectMvu, processMessage, processMessageWithEvents, latestMvuVars, extractUpdateBlocks, withStatusPlaceholder, STATUS_PLACEHOLDER, MVU_EVENTS } from './mvu.js';
+import { cardDepthPrompt, cardRegexScripts, cardTavernHelperScripts, cardLinkedWorld, cardGreetings } from './card.js';
 import { presetTavernHelperScripts } from './preset.js';
+import { syncSwipe } from './chat.js';
 import { getPath, clone } from './util.js';
 import { hasEjs } from './ejs.js';
 
@@ -198,18 +199,51 @@ export class ChatSession {
         });
     }
 
+    /**
+     * 这张卡靠不靠 MVU 的状态栏占位符显示状态栏：卡 / 预设 / 全局正则里有替换它的，或开场白里本来就带着。
+     * 真正的 MVU 脚本会给每条 AI 回复补上占位符；这里只在确实有人用它时才补，免得往别的卡的正文里塞东西。
+     */
+    usesStatusPlaceholder() {
+        if (this.regexScripts().some(r => !r.disabled && String(r.findRegex ?? '').includes('StatusPlaceHolderImpl'))) return true;
+        return cardGreetings(this.card).some(g => String(g).includes(STATUS_PLACEHOLDER));
+    }
+
     /** 没有任何楼层带 stat_data 时，用 [initvar] 初始化开场白楼层（每个 swipe 各一份） */
     ensureMvuInit() {
         if (!this.mvuEnabled() || !this.chat.length) return false;
         if (latestMvuVars(this.chat)) return false;
         const init = collectInitVars(this.allWorldEntries());
         const first = this.chat[0];
-        const swipes = Array.isArray(first.swipes) && first.swipes.length ? first.swipes : [first.mes];
+        const hasSwipes = Array.isArray(first.swipes) && first.swipes.length > 0;
+        const swipes = hasSwipes ? first.swipes : [first.mes];
         first.variables = Array.isArray(first.variables) ? first.variables : [];
+        const placeholder = !first.is_user && Object.keys(init).length > 0 && this.usesStatusPlaceholder();
         swipes.forEach((text, i) => {
             const base = { ...(first.variables[i] ?? {}), stat_data: clone(init) };
             first.variables[i] = extractUpdateBlocks(text).length ? processMessage(base, text).variables : base;
+            if (placeholder && typeof text === 'string' && !text.includes(STATUS_PLACEHOLDER)) {
+                const next = withStatusPlaceholder(text);
+                if (hasSwipes) first.swipes[i] = next;
+                if (!hasSwipes || i === (first.swipe_id ?? 0)) first.mes = next;
+            }
         });
+        // 刚初始化、还没通知过监听 mag_variable_initialized 的脚本（变量结构脚本靠它补默认值）
+        this.mvuInitPending = true;
+        this.vars.invalidate();
+        return true;
+    }
+
+    /**
+     * 把开场白楼层每个 swipe 的变量交给监听者过一遍（它们会原地改 stat_data）。
+     * @param {(variables: object, swipeId: number) => Promise<void>} notify
+     */
+    async notifyMvuInit(notify) {
+        const first = this.chat[0];
+        if (!first || !Array.isArray(first.variables)) return false;
+        for (let i = 0; i < first.variables.length; i++) {
+            const v = first.variables[i];
+            if (v && typeof v === 'object' && v.stat_data) await notify(v, i);
+        }
         this.vars.invalidate();
         return true;
     }
@@ -222,10 +256,45 @@ export class ChatSession {
         const prev = latestMvuVars(this.chat, index - 1);
         const prevVars = prev ? prev.vars : { stat_data: collectInitVars(this.allWorldEntries()) };
         const res = processMessage(prevVars, messageText(msg));
-        if (!Array.isArray(msg.variables)) msg.variables = [];
-        msg.variables[msg.swipe_id ?? 0] = { ...(msg.variables[msg.swipe_id ?? 0] ?? {}), ...res.variables };
-        this.vars.invalidate();
+        this.storeMvuResult(msg, res.variables, messageText(msg));
         return res;
+    }
+
+    /**
+     * 同 applyMvu，但更新过程中发 MVU 事件（有脚本在监听时用）。emit 为空就退回同步路径。
+     * @param {number} index
+     * @param {((name: string, ...args: any[]) => Promise<void>)|null} emit
+     */
+    async applyMvuAsync(index, emit) {
+        if (!emit) return this.applyMvu(index);
+        if (!this.mvuEnabled()) return null;
+        const msg = this.chat[index];
+        if (!msg || msg.is_user) return null;
+        const prev = latestMvuVars(this.chat, index - 1);
+        const prevVars = prev ? prev.vars : { stat_data: collectInitVars(this.allWorldEntries()) };
+        const text = messageText(msg);
+        const res = await processMessageWithEvents(prevVars, text, emit);
+        const ctx = { variables: res.variables, message_content: text };
+        await emit(MVU_EVENTS.BEFORE_MESSAGE_UPDATE, ctx);
+        // 监听者改过正文就用它的；没改过就用现在的正文（等监听者的时候别处可能已经改了）
+        const content = typeof ctx.message_content === 'string' && ctx.message_content !== text ? ctx.message_content : messageText(msg);
+        this.storeMvuResult(msg, ctx.variables ?? res.variables, content);
+        return res;
+    }
+
+    storeMvuResult(msg, variables, content) {
+        if (!Array.isArray(msg.variables)) msg.variables = [];
+        const sid = msg.swipe_id ?? 0;
+        const merged = { ...(msg.variables[sid] ?? {}), ...variables };
+        // 变量结构脚本会去掉 display_data / delta_data，这里别把旧的留下来
+        for (const k of ['display_data', 'delta_data']) if (!(k in variables)) delete merged[k];
+        msg.variables[sid] = merged;
+        const text = this.usesStatusPlaceholder() ? withStatusPlaceholder(content) : content;
+        if (text !== msg.mes) {
+            msg.mes = text;
+            if (Array.isArray(msg.swipes)) syncSwipe(msg);
+        }
+        this.vars.invalidate();
     }
 
     // ---------- EJS ----------
@@ -251,9 +320,12 @@ export class ChatSession {
 
     // ---------- 提示词 ----------
     /**
-     * @param {{type?: string, quietPrompt?: string, dryRun?: boolean, excludeLast?: boolean}} opt
+     * @param {{type?: string, quietPrompt?: string, dryRun?: boolean, excludeLast?: boolean,
+     *   maxHistory?: number, historyOverride?: Array<{role: string, content: string}>, appendHistory?: Array<{role: string, content: string}>,
+     *   fieldOverrides?: object}} opt 后四个是给脚本的 generate() 用的：只取最近几条聊天记录、整段替换聊天记录、
+     *   在聊天记录末尾加几条（这次的用户输入）、覆盖角色描述等字段
      */
-    async preparePrompt({ type = 'normal', quietPrompt = '', dryRun = false, excludeLast = false } = {}) {
+    async preparePrompt({ type = 'normal', quietPrompt = '', dryRun = false, excludeLast = false, maxHistory, historyOverride, appendHistory, fieldOverrides } = {}) {
         this.lastGenerationType = type;
         if (!dryRun) this.ensureMvuInit();
         const wiSettings = { ...DEFAULT_WI_SETTINGS, ...(this.settings.worldInfo ?? {}) };
@@ -267,7 +339,7 @@ export class ChatSession {
         if (dryRun) snapshot = { meta: clone(this.meta?.variables ?? {}), global: clone(this.vars.global()), msgs: this.chat.map(m => clone(m.variables)) };
 
         try {
-            this._fieldsCache = this.fields();
+            this._fieldsCache = { ...this.fields(), ...(fieldOverrides ?? {}) };
             const fields = this._fieldsCache;
             const sub = (t, extra) => this.substitute(t, extra, fields);
 
@@ -330,7 +402,15 @@ export class ChatSession {
             this.outlets = worldInfo.outlets;
             if (!dryRun) this.templateState.forced.clear();
 
-            const history = core.map(x => ({
+            const asHistory = (h) => ({
+                role: h.role === 'user' ? 'user' : 'assistant',
+                content: String(h.content ?? ''),
+                name: h.role === 'user' ? this.names.user : this.names.char,
+                isUser: h.role === 'user',
+                narrator: h.role === 'system',
+                forceAvatar: false,
+            });
+            let history = Array.isArray(historyOverride) ? historyOverride.map(asHistory) : core.map(x => ({
                 role: x.m.is_user ? 'user' : 'assistant',
                 content: x.text,
                 name: x.m.name,
@@ -338,6 +418,8 @@ export class ChatSession {
                 narrator: isNarrator(x.m),
                 forceAvatar: !!x.m.force_avatar,
             }));
+            if (Number.isFinite(maxHistory)) history = maxHistory > 0 ? history.slice(-maxHistory) : [];
+            if (Array.isArray(appendHistory)) history.push(...appendHistory.map(asHistory));
             const continueMsg = isContinue ? core[core.length - 1] : null;
 
             const built = buildChatCompletion({
@@ -400,6 +482,8 @@ export class ChatSession {
                 prefill: built.prefill,
                 debug: { ...built.debug, activated: worldInfo.activated.map(e => ({ world: e.world, uid: e.uid, comment: e.comment, position: e.position })), wiOverflow: worldInfo.overflow },
                 worldInfo,
+                fields,
+                history,
             };
             if (!dryRun) this.lastPrompt = result;
             return result;

@@ -1,6 +1,6 @@
 // 应用动作：选角色、开/建聊天、构建会话、消息增删改。UI 模块都通过这里改状态。
 import { api } from './api.js';
-import { state, eventSource, event_types, saveChat, saveSettings, ensurePreset, loadWorld, activePersona, refreshLists, flushPending } from './state.js';
+import { state, eventSource, event_types, saveChat, saveSettings, ensurePreset, loadWorld, activePersona, refreshLists, flushPending, mvuEmitter } from './state.js';
 import { ChatSession } from './core/session.js';
 import { parseChatJsonl, newChatHeader, createGreetingMessage, createUserMessage, newChatName, messageText, syncSwipe } from './core/chat.js';
 import { cardGreetings } from './core/card.js';
@@ -126,6 +126,7 @@ export async function newChat({ greetingIndex = 0 } = {}) {
     state.view = 'chat';
     state.settings.lastChat = { file: state.char.file, chat: name };
     saveSettings();
+    await eventSource.emit(event_types.CHAT_CREATED);
     await eventSource.emit(event_types.CHAT_CHANGED, name);
     refresh(['chat', 'topbar', 'sidebar', 'panels']);
 }
@@ -172,7 +173,7 @@ export async function editMessage(index, text) {
     const s = getSession();
     m.mes = s.processEdited(text, m.is_user);
     if (Array.isArray(m.swipes)) syncSwipe(m);
-    if (!m.is_user && s.mvuEnabled()) s.applyMvu(index);
+    if (!m.is_user && s.mvuEnabled()) await s.applyMvuAsync(index, mvuEmitter());
     s.vars.invalidate();
     await eventSource.emit(event_types.MESSAGE_EDITED, index);
     ui.renderMessage?.(index);
@@ -207,7 +208,7 @@ export async function setPreset(name) {
     await ensurePreset();
     state.session = null;
     saveSettings();
-    await eventSource.emit(event_types.PRESET_CHANGED, name);
+    await eventSource.emit(event_types.PRESET_CHANGED, { apiId: 'openai', name });
     refresh(['panels', 'topbar']);
 }
 

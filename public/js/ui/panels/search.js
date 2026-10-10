@@ -59,6 +59,10 @@ export const FEATURES = [
     // ---- 角色 › 正则
     { t: '正则脚本（全局 / 角色 / 预设）', tab: 'regex', k: 'regex 替换 美化 仅显示' },
 
+    // ---- 角色 › 脚本
+    { t: '酒馆助手脚本（角色卡 / 预设自带）', tab: 'scripts', find: '运行角色卡和预设自带的脚本', k: 'tavern helper js-slash-runner 小手机 悬浮窗 状态栏 变量结构 zod 脚本库' },
+    { t: '重新加载脚本', tab: 'scripts', find: ['全部重新加载', '酒馆助手脚本'], k: 'reload 重启 脚本没反应' },
+
     // ---- 本聊天
     { t: '作者注释', tab: 'note', find: '作者注释（只对这个聊天生效）', k: "author's note 本聊天 备注 注入" },
     { t: '聊天绑定的世界书', tab: 'note', find: '绑定世界书（只对这个聊天生效）', k: 'lorebook chat 本聊天' },

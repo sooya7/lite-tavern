@@ -126,7 +126,7 @@
     const deleteChatMessages = (ids, opt) => rpc('deleteChatMessages', ids, opt || {});
     const triggerSlash = (cmd) => rpc('triggerSlash', String(cmd));
     const generate = (cfg) => rpc('generate', cfg || {});
-    const generateRaw = (cfg) => rpc('generate', cfg || {});
+    const generateRaw = (cfg) => rpc('generateRaw', cfg || {});
 
     // ---------- 事件 ----------
     function eventOn(name, fn) {
