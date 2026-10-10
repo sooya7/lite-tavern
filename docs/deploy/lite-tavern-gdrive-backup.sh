@@ -13,8 +13,8 @@ REMOTE_KEEP="${LT_BACKUP_REMOTE_KEEP:-30}"
 RCLONE_CONFIG="${LT_BACKUP_RCLONE_CONFIG:-/root/.config/rclone/rclone.conf}"
 PING_URL="${LT_PING_URL:-http://127.0.0.1:8730/api/ping}"
 # 出口代理时好时坏（节点自动切换），rclone 的每一步都整体重试
-TRIES="${LT_BACKUP_TRIES:-10}"
-TRY_SLEEP="${LT_BACKUP_TRY_SLEEP:-90}"
+TRIES="${LT_BACKUP_TRIES:-40}"
+TRY_SLEEP="${LT_BACKUP_TRY_SLEEP:-20}"
 PREFIX="lite-tavern-backup-"
 
 log() { echo "[lt-backup] $*"; }
