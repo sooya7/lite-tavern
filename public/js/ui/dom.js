@@ -75,7 +75,23 @@ const ICONS = {
     brain: '<path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 4.44-1.54"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-4.44-1.54"/>',
     message: '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
     note: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M8 13h8M8 17h5"/>',
+    arrowUp: '<path d="M12 19V5"/><path d="m5 12 7-7 7 7"/>',
+    panelLeft: '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18"/>',
+    panelRight: '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M15 3v18"/>',
+    users: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>',
+    idCard: '<rect x="2" y="5" width="20" height="14" rx="2"/><circle cx="8.5" cy="11" r="2"/><path d="M5.5 16c.6-1.4 1.7-2 3-2s2.4.6 3 2M14 10h4M14 14h3"/>',
+    clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+    chevronUpDown: '<path d="m7 15 5 5 5-5"/><path d="m7 9 5-5 5 5"/>',
+    cpu: '<rect x="5" y="5" width="14" height="14" rx="2"/><rect x="9" y="9" width="6" height="6" rx="1"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/>',
+    home: '<path d="m3 10 9-7 9 7v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/>',
 };
+
+/** 轻酒馆的标志：一只带把手的杯子 */
+export const BRAND_SVG = '<svg viewBox="0 0 32 32" fill="none" aria-hidden="true"><path d="M7 9.5h14.5v8.5a6 6 0 0 1-6 6h-2.5a6 6 0 0 1-6-6z" fill="currentColor"/><path d="M21.5 12.5h1.8a3.2 3.2 0 0 1 0 6.4h-1.8" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/><path d="M11 4.5c0 1.2-1 1.6-1 2.8M15.5 4.5c0 1.2-1 1.6-1 2.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" opacity=".55"/></svg>';
+
+export function brandMark(cls = 'brand-mark') {
+    return h('span', { class: cls, html: BRAND_SVG });
+}
 
 export function icon(name, cls = '') {
     const span = document.createElement('span');
@@ -164,7 +180,7 @@ export function popupMenu(anchor, items) {
     const menu = h('div', { class: 'menu', role: 'menu' }, items.filter(Boolean).map(it => it === '-' ? h('div', { class: 'sep' }) : h('button', {
         type: 'button',
         role: 'menuitem',
-        class: it.danger ? 'danger' : '',
+        class: [it.danger ? 'danger' : '', it.current ? 'current' : ''].filter(Boolean).join(' '),
         style: it.danger ? { color: 'var(--danger)' } : undefined,
         onclick: () => { menu.remove(); openMenu = null; it.onClick?.(); },
     }, it.icon ? icon(it.icon) : null, it.label)));

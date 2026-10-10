@@ -3,9 +3,16 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
-<meta name="theme-color" content="#1d1b19">
+<meta name="theme-color" content="#faf9f5">
 <title>轻酒馆</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23c9733f'/%3E%3Cpath d='M18 20h24v20a10 10 0 0 1-10 10h-4a10 10 0 0 1-10-10z' fill='%23fff7ec'/%3E%3Cpath d='M42 25h4a6 6 0 0 1 0 12h-4' stroke='%23fff7ec' stroke-width='4' fill='none'/%3E%3C/svg%3E">
+<script>
+// 先按上次的主题上色，免得深色用户刷新时白屏闪一下（真正的设置在 settings.json，启动后会再应用一次）
+try {
+    const t = localStorage.getItem('lt-theme') || 'auto';
+    document.documentElement.dataset.theme = t === 'auto' ? (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light') : t;
+} catch { /* 无痕模式等拿不到 localStorage */ }
+</script>
 <link rel="stylesheet" href="css/app.css">
 <script src="vendor/lodash.min.js"></script>
 <script src="vendor/showdown.min.js"></script>

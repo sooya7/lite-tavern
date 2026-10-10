@@ -7,6 +7,7 @@ import { readCardJson, writeCardPng, isPng, extractChunks } from '../public/js/c
 import { normalizeCard, toExportCard } from '../public/js/core/card.js';
 import { characterBookToWorld, normalizeWorld } from '../public/js/core/worldinfo.js';
 import { HttpError } from './http.mjs';
+import { makeThumbnail } from './thumb.mjs';
 
 export const DIRS = ['characters', 'chats', 'presets', 'worlds', 'avatars', 'backups', 'trash', 'extensions', 'files'];
 
@@ -26,6 +27,7 @@ export class Store {
         for (const d of DIRS) fs.mkdirSync(path.join(this.root, d), { recursive: true });
         this.cardMeta = new Map(); // file → {mtime, meta}
         this.lastBackup = new Map();
+        this.thumbJobs = new Map(); // 同一张缩略图并发请求只生成一次
     }
 
     p(...parts) {
@@ -186,6 +188,39 @@ export class Store {
         await this.writeAtomic(full, Buffer.from(writeCardPng(image, toExportCard(normalized))));
         this.cardMeta.delete(file);
         return normalized;
+    }
+
+    /**
+     * 角色头像缩略图路径（_cache/thumbs，按原图 mtime 命名，原图一改自动失效）。
+     * 不是 PNG 或解码失败返回 null，调用方退回原图。
+     */
+    async cardThumbnail(file, short = 160) {
+        const src = this.p('characters', sanitizeName(file));
+        if (!/\.png$/i.test(file)) return null;
+        const st = await fsp.stat(src);
+        const base = sanitizeName(file.replace(/\.png$/i, ''));
+        const dir = this.p('_cache', 'thumbs');
+        const out = path.join(dir, `${base}.${Math.floor(st.mtimeMs).toString(36)}.${short}.png`);
+        if (fs.existsSync(out)) return out;
+        if (this.thumbJobs.has(out)) return this.thumbJobs.get(out);
+        const job = (async () => {
+            try {
+                const png = makeThumbnail(await fsp.readFile(src), short);
+                await fsp.mkdir(dir, { recursive: true });
+                const stale = new RegExp(`^${base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.[0-9a-z]+\\.${short}\\.png$`);
+                for (const old of await fsp.readdir(dir)) {
+                    if (stale.test(old)) await fsp.unlink(path.join(dir, old)).catch(() => {});
+                }
+                await this.writeAtomic(out, png);
+                return out;
+            } catch {
+                return null;
+            } finally {
+                this.thumbJobs.delete(out);
+            }
+        })();
+        this.thumbJobs.set(out, job);
+        return job;
     }
 
     async setCardAvatar(file, imageBytes) {

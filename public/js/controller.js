@@ -69,6 +69,7 @@ export async function selectCharacter(file, { openLatest = true } = {}) {
     const card = await api.getCharacter(file);
     const id = file.replace(/\.(png|json)$/i, '');
     state.char = { file, id, card };
+    state.view = 'chat';
     state.chat = null;
     state.session = null;
     state.chatList = await api.listChats(id);
@@ -87,6 +88,7 @@ export async function openChat(name) {
     const { header, messages } = parseChatJsonl(text);
     state.chat = { name, header, messages };
     state.session = null;
+    state.view = 'chat';
     state.settings.lastChat = { file: state.char.file, chat: name };
     saveSettings();
     await loadRelevantWorlds();
@@ -121,6 +123,7 @@ export async function newChat({ greetingIndex = 0 } = {}) {
     s.ensureMvuInit();
     await api.saveChat(state.char.id, name, (await import('./core/chat.js')).serializeChat(header, messages));
     state.chatList = await api.listChats(state.char.id);
+    state.view = 'chat';
     state.settings.lastChat = { file: state.char.file, chat: name };
     saveSettings();
     await eventSource.emit(event_types.CHAT_CHANGED, name);

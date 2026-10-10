@@ -54,8 +54,8 @@ export const eventSource = new EventBus();
 
 export const DEFAULT_SETTINGS = {
     version: 1,
-    theme: 'dark',
-    ui: { leftOpen: true, rightOpen: true, rightTab: 'connection', fontSize: 16, chatWidth: 860, enterToSend: true, showReasoning: true, showMesId: false, readerFont: false, renderFrontend: true },
+    theme: 'auto', // auto 跟随系统
+    ui: { leftOpen: true, rightOpen: true, rightTab: 'connection', fontSize: 16, chatWidth: 780, enterToSend: true, showReasoning: true, showMesId: false, renderFrontend: true },
     connections: [],
     activeConnection: '',
     activePreset: '',
@@ -82,6 +82,7 @@ export const state = {
     worldList: [],
     worlds: {}, // name → normalized world
     session: null,
+    view: 'chat', // chat | home（首页：问候 + 角色库）
     generating: false,
     abort: null,
     secrets: {},

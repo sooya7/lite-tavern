@@ -1,6 +1,6 @@
 // 消息渲染：对齐酒馆 messageFormatting（引号高亮、showdown、DOMPurify、<style> 作用域），
 // 另外把含完整 HTML 文档的代码块渲染成沙箱 iframe（酒馆助手式前端卡）。
-import { h } from './dom.js';
+import { h, icon } from './dom.js';
 
 let converter = null;
 function getConverter() {
@@ -36,9 +36,10 @@ function setupPurify() {
 const FRONTEND_RE = /<html[\s>]|<body[\s>]|<!doctype html/i;
 
 /** 把 ``` 代码块里的完整 HTML 文档抽出来，换成占位 */
-function extractFrontends(text) {
+export function extractFrontends(text) {
     const frontends = [];
-    const out = text.replace(/(^|\n)([ \t]*)(```|~~~)[^\n]*\n([\s\S]*?)\n[ \t]*\3[ \t]*(?=\n|$)/g, (m, lead, indent, fence, body) => {
+    // 与 showdown 一致：围栏后的语言标记里不能有反引号，否则“```地点·时间```”这种单行代码会被当成代码块开头
+    const out = text.replace(/(^|\n)([ \t]*)(```|~~~)[^\n`]*\n([\s\S]*?)\n[ \t]*\3[ \t]*(?=\n|$)/g, (m, lead, indent, fence, body) => {
         if (!FRONTEND_RE.test(body)) return m;
         frontends.push(body);
         return `${lead}<div data-lt-frontend="${frontends.length - 1}"></div>`;
@@ -107,7 +108,8 @@ function highlightQuotes(mes) {
 export function formatMessage(text, { charName, isUser = false, isSystem = false } = {}) {
     if (!text) return { html: '', frontends: [], styles: [] };
     setupPurify();
-    let mes = String(text);
+    // 很多卡是 Windows 换行，不归一的话代码块的闭合 ``` 后面跟着 \r，前端卡识别不出来
+    let mes = String(text).replace(/\r\n?/g, '\n');
     const fe = extractFrontends(mes);
     mes = fe.text;
     const st = extractStyles(mes);
@@ -157,6 +159,6 @@ export function renderReasoning(text, { open = false, streaming = false, duratio
     if (!text) return null;
     const secs = duration ? `${(duration / 1000).toFixed(1)} 秒` : '';
     return h('details', { class: 'reasoning', open },
-        h('summary', {}, streaming ? '思考中…' : `思维链${secs ? ' · ' + secs : ''}`),
+        h('summary', {}, icon(streaming ? 'clock' : 'brain'), streaming ? '思考中…' : `思考过程${secs ? ' · ' + secs : ''}`, icon('chevronDown', 'chev')),
         h('div', { class: 'reasoning-body' }, text));
 }

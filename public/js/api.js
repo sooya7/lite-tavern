@@ -40,6 +40,8 @@ export const api = {
     importCharacter: (file) => request('POST', '/api/characters/import', file, { headers: { 'X-File-Name': enc(file.name) } }),
     setCharacterAvatar: (file, blob) => request('PUT', `/api/characters/${enc(file)}/avatar`, blob),
     avatarUrl: (file, v = '') => `/api/characters/${enc(file)}/avatar${v ? `?v=${v}` : ''}`,
+    /** 列表用的小图（服务端缩放，去掉卡片元数据）；v 用原图 mtime，变了才会重新下载 */
+    thumbUrl: (file, v = '') => `/api/characters/${enc(file)}/avatar?thumb=1${v ? `&v=${v}` : ''}`,
     exportCharacterUrl: (file, format) => `/api/characters/${enc(file)}/export?format=${format}`,
 
     listChats: (charId) => request('GET', `/api/chats/${enc(charId)}`),

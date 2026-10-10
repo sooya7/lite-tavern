@@ -86,6 +86,16 @@ router.put('/api/secrets/:id', async (req, res, { id }) => {
 router.get('/api/characters', async () => store.listCharacters());
 router.get('/api/characters/:file', async (req, res, { file }) => store.readCard(file));
 router.get('/api/characters/:file/avatar', async (req, res, { file }) => {
+    const url = new URL(req.url, 'http://x');
+    // ?thumb=1 给列表用的小图；带了 ?v=（原图 mtime）就允许浏览器长期缓存，省掉每张头像一次 304 往返
+    const versioned = url.searchParams.has('v');
+    if (url.searchParams.get('thumb') === '1') {
+        const thumb = await store.cardThumbnail(file).catch(() => null);
+        if (thumb) {
+            serveFile(req, res, thumb, { cache: versioned ? 'private, max-age=31536000, immutable' : 'no-cache' });
+            return undefined;
+        }
+    }
     serveFile(req, res, store.p('characters', sanitizeName(file)), { cache: 'no-cache' });
     return undefined;
 });

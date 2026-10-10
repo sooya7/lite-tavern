@@ -63,9 +63,11 @@ function show(out) {
             h('summary', {}, h('b', {}, '激活的世界书条目'), h('span', { class: 'muted' }, `${act.length} 条`)),
             h('pre', {}, act.map(e => `[${e.world}] ${e.comment || e.uid}`).join('\n'))));
     }
+    // 预设里的自定义条目来源是 UUID，换成条目名字
+    const promptName = new Map((state.preset?.data?.prompts ?? []).filter(p => p.name).map(p => [p.identifier, p.name]));
     msgs.forEach((m, i) => {
         const src = String(m.source ?? '');
-        const srcLabel = SOURCE_LABEL[src] ?? (src.startsWith('wi:') ? `世界书 ${src.slice(3)}` : src.startsWith('chat') || src === 'history' ? '聊天记录' : src);
+        const srcLabel = SOURCE_LABEL[src] ?? promptName.get(src) ?? (src.startsWith('wi:') ? `世界书 ${src.slice(3)}` : src.startsWith('chat') || src === 'history' ? '聊天记录' : src);
         out.append(h('details', { class: 'prompt-msg', open: i === msgs.length - 1 },
             h('summary', {},
                 h('span', { class: `tag ${m.role === 'system' ? '' : m.role === 'user' ? 'ok' : 'accent'}` }, ROLE_LABEL[m.role] ?? m.role),

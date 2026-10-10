@@ -87,11 +87,12 @@ def main():
         ctx = browser.new_context(viewport={'width': 1440, 'height': 900}, locale='zh-CN')
         page = ctx.new_page()
         page.on('console', lambda m: errors.append(f'console.{m.type}: {m.text}') if m.type in ('error',) else None)
-        page.on('pageerror', lambda e: errors.append(f'pageerror: {e}'))
+        page.on('pageerror', lambda e: errors.append(f'pageerror: {e} @ {" | ".join((getattr(e, "stack", "") or "").splitlines()[1:3]).strip()}'))
 
         def open_app():
             page.goto(BASE + '/')
-            page.wait_for_selector('#composer textarea')
+            page.wait_for_selector('#composer textarea', state='attached')
+            page.wait_for_selector('#chat .home-wrap')  # 还没有角色：首页（问候 + 上手步骤）
             page.wait_for_timeout(500)
             shot('01-first-run')
         run('打开首页', open_app)
@@ -287,13 +288,21 @@ def main():
             assert mes_count() == n, f'刷新后消息数 {mes_count()}（应为 {n}）'
         run('刷新后恢复上次聊天', reload_restore)
 
-        def light_theme():
+        def toggle_theme():
+            before = page.evaluate("document.documentElement.dataset.theme")
+            assert before in ('light', 'dark'), f'主题属性异常：{before!r}'
             page.locator('#topbar button[title="切换深浅色"]').click()
             page.wait_for_timeout(300)
-            assert page.evaluate("document.documentElement.dataset.theme") == 'light'
-            shot('08-light')
+            after = page.evaluate("document.documentElement.dataset.theme")
+            assert after != before, f'点了切换主题没变（还是 {after}）'
+            shot(f'08-{after}')
+            page.reload()
+            page.wait_for_selector('#chat .mes')
+            assert page.evaluate("document.documentElement.dataset.theme") == after, '刷新后主题没保住'
             page.locator('#topbar button[title="切换深浅色"]').click()
-        run('切换浅色主题', light_theme)
+            page.wait_for_timeout(300)
+            assert page.evaluate("document.documentElement.dataset.theme") == before
+        run('切换深浅色并在刷新后保持', toggle_theme)
 
         def mobile():
             mctx = browser.new_context(viewport={'width': 390, 'height': 844}, is_mobile=True, has_touch=True, locale='zh-CN')

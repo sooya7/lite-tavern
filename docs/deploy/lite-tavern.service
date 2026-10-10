@@ -1,0 +1,20 @@
+[Unit]
+Description=轻酒馆 lite-tavern (127.0.0.1:8730, 外网经 nginx 8446)
+After=network.target
+
+[Service]
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/lite-tavern/app
+ExecStart=/usr/bin/node /opt/lite-tavern/app/server.mjs --port 8730 --host 127.0.0.1 --data /opt/lite-tavern/data
+Restart=on-failure
+RestartSec=3
+MemoryMax=320M
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/opt/lite-tavern/data
+
+[Install]
+WantedBy=multi-user.target

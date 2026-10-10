@@ -1,18 +1,63 @@
-// 左栏：角色列表 / 当前角色的聊天记录
-import { h, $, clear, icon, iconBtn, toast, confirmDialog, promptDialog, popupMenu, pickFiles, formatTime, downloadText } from './dom.js';
-import { state, saveSettings, refreshLists } from '../state.js';
+// 左栏：新聊天 / 角色库入口、最近角色、当前角色的聊天记录、底部用户设定
+import { h, $, clear, icon, iconBtn, toast, confirmDialog, promptDialog, popupMenu, pickFiles, formatTime, downloadText, brandMark } from './dom.js';
+import { state, saveSettings, refreshLists, activePersona } from '../state.js';
 import { api } from '../api.js';
 import { selectCharacter, openChat, newChat, reloadCharacters, refresh } from '../controller.js';
 import { importFiles } from './importers.js';
 import { newCard } from '../core/card.js';
 import { cardGreetings } from '../core/card.js';
+import { charAvatar, personaAvatar } from './avatars.js';
 
-let tab = 'chars';
-let query = '';
+const RECENT_CHARS = 6;
 
 const isNarrow = () => matchMedia('(max-width: 760px)').matches;
-function closeOnMobile() {
+export function closeOnMobile() {
     if (isNarrow()) window.dispatchEvent(new CustomEvent('lt:toggle-left', { detail: false }));
+}
+const openPanel = (id) => window.dispatchEvent(new CustomEvent('lt:open-panel', { detail: id }));
+
+/** 回到首页（问候 + 角色库） */
+export function goHome() {
+    state.view = 'home';
+    refresh(['chat', 'topbar', 'sidebar']);
+    closeOnMobile();
+}
+
+/** 酒馆默认的聊天名是“角色名 - 2026-10-09@22h37m12s”，列表里显示成日期 */
+export function chatTitle(name, charName = state.char?.card?.data?.name) {
+    let n = String(name ?? '');
+    if (charName && n.startsWith(`${charName} - `)) n = n.slice(charName.length + 3);
+    const m = n.match(/^(\d{4})-(\d{1,2})-(\d{1,2})\s*@\s*(\d{1,2})h\s*(\d{1,2})m(?:\s*\d{1,2}s)?(?:\s*\d+ms)?$/);
+    if (!m) return n || String(name ?? '');
+    const p = (x) => String(x).padStart(2, '0');
+    const sameYear = Number(m[1]) === new Date().getFullYear();
+    return `${sameYear ? '' : `${m[1]}年`}${Number(m[2])}月${Number(m[3])}日 ${p(m[4])}:${p(m[5])}`;
+}
+
+/** 消息预览：去掉标签、代码块和多余空白 */
+export function plainSnippet(text, max = 80) {
+    return String(text ?? '')
+        .replace(/```[\s\S]*?(```|$)/g, ' ')
+        .replace(/<(style|script)[\s\S]*?<\/\1>/gi, ' ')
+        .replace(/<[^>]*>/g, ' ')
+        .replace(/[*_`#>]+/g, '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, max);
+}
+
+export async function startNewChat(anchor) {
+    if (!state.char) { goHome(); return; }
+    const greetings = cardGreetings(state.char.card);
+    if (greetings.filter(Boolean).length > 1 && anchor) {
+        popupMenu(anchor, greetings.map((g, i) => ({
+            label: `${i === 0 ? '默认开场白' : `备选开场白 ${i}`}：${plainSnippet(g, 24)}…`,
+            onClick: async () => { await newChat({ greetingIndex: i }); closeOnMobile(); },
+        })));
+        return;
+    }
+    await newChat();
+    closeOnMobile();
 }
 
 export function renderSidebar() {
@@ -20,22 +65,44 @@ export function renderSidebar() {
     if (!root) return;
     const listScroll = root.querySelector('.side-list')?.scrollTop ?? 0;
     clear(root);
+    const home = state.view === 'home' || !state.char;
+    const charName = state.char?.card?.data?.name ?? '';
+    const list = h('div', { class: 'side-list' });
     root.append(
         h('div', { class: 'side-head' },
-            h('div', { class: 'brand' }, h('span', { class: 'brand-dot' }, '酒'), '轻酒馆'),
+            h('div', { class: 'brand' }, brandMark(), '轻酒馆'),
             iconBtn('upload', '导入角色卡 / 预设 / 世界书（也可以直接把文件拖进窗口）', onImport),
-            iconBtn('plus', '新建角色', onCreate),
-            isNarrow() ? iconBtn('x', '收起', () => closeOnMobile()) : null,
+            iconBtn(isNarrow() ? 'x' : 'panelLeft', '收起侧栏', () => window.dispatchEvent(new CustomEvent('lt:toggle-left', { detail: false }))),
         ),
-        h('div', { class: 'tabs', style: { padding: '0 8px' } },
-            h('button', { class: `tab ${tab === 'chars' ? 'active' : ''}`, onclick: () => { tab = 'chars'; renderSidebar(); } }, `角色 ${state.characters.length || ''}`),
-            h('button', { class: `tab ${tab === 'chats' ? 'active' : ''}`, onclick: () => { tab = 'chats'; renderSidebar(); }, disabled: !state.char }, `聊天记录 ${state.char ? state.chatList.length : ''}`),
+        h('div', { class: 'side-nav' },
+            h('button', {
+                class: 'nav-item new-chat',
+                title: state.char ? `和「${charName}」开始新聊天` : '先选一个角色',
+                onclick: (e) => startNewChat(e.currentTarget),
+            }, h('span', { class: 'nc-ic' }, icon('plus')), '新聊天'),
+            h('button', { class: `nav-item ${home ? 'active' : ''}`, onclick: goHome }, icon('users'), '角色库',
+                h('span', { class: 'nav-count' }, state.characters.length || '')),
+            h('button', { class: 'nav-item', onclick: () => { openPanel('import'); } }, icon('import'), '从酒馆导入'),
         ),
+        list,
+        sideFoot(),
     );
-    if (tab === 'chats' && state.char) renderChats(root);
-    else renderChars(root);
-    const list = root.querySelector('.side-list');
-    if (list) list.scrollTop = listScroll;
+    renderRecentChars(list);
+    if (state.char) renderChats(list);
+    list.scrollTop = listScroll;
+}
+
+function sideFoot() {
+    const p = activePersona();
+    return h('div', { class: 'side-foot' },
+        h('div', { class: 'row', style: { gap: '2px' } },
+            h('button', { class: 'persona-row grow', title: '用户设定（你在故事里的身份）', onclick: () => { openPanel('persona'); } },
+                personaAvatar(p),
+                h('div', { class: 'grow' },
+                    h('div', { class: 'p-name' }, p.name || 'User'),
+                    h('div', { class: 'p-sub' }, `用户设定${state.settings.personas.length > 1 ? ` · 共 ${state.settings.personas.length} 个` : ''}`))),
+            iconBtn('settings', '设置', () => openPanel('settings')),
+        ));
 }
 
 function charSort(a, b) {
@@ -44,54 +111,47 @@ function charSort(a, b) {
     return lb - la;
 }
 
-function renderChars(root) {
-    const search = h('input', { class: 'input', placeholder: '搜索名字或标签…', value: query, type: 'search' });
-    const list = h('div', { class: 'side-list' });
-    const fill = () => {
-        clear(list);
-        const q = query.trim().toLowerCase();
-        const items = state.characters.filter(c => !q || String(c.name).toLowerCase().includes(q) || (c.tags ?? []).some(t => String(t).toLowerCase().includes(q))).sort(charSort);
-        if (!items.length) {
-            list.append(h('div', { class: 'empty' }, state.characters.length ? '没有匹配的角色' : h('div', {},
-                h('div', {}, '还没有角色'),
-                h('div', { class: 'row', style: { justifyContent: 'center', marginTop: '10px', flexWrap: 'wrap' } },
-                    h('button', { class: 'btn small', onclick: onImport }, icon('upload'), '导入卡'),
-                    h('button', { class: 'btn small', onclick: () => window.dispatchEvent(new CustomEvent('lt:open-panel', { detail: 'import' })) }, icon('import'), '从酒馆搬'),
-                ))));
-            return;
-        }
-        for (const c of items) list.append(charItem(c));
-    };
-    search.addEventListener('input', () => { query = search.value; fill(); });
-    root.append(h('div', { class: 'side-search' }, search), list);
-    fill();
+function renderRecentChars(list) {
+    const all = [...state.characters].sort(charSort);
+    let items = all.slice(0, RECENT_CHARS);
+    const cur = state.char && all.find(c => c.file === state.char.file);
+    if (cur && !items.includes(cur)) items = [cur, ...items.slice(0, RECENT_CHARS - 1)];
+    list.append(h('div', { class: 'section-title' },
+        h('span', { class: 'grow' }, '最近角色'),
+        all.length > items.length ? h('button', { class: 'section-link', onclick: goHome }, `全部 ${all.length}`) : null));
+    if (!items.length) {
+        list.append(h('div', { class: 'empty small', style: { padding: '12px' } },
+            h('div', {}, '还没有角色'),
+            h('div', { class: 'row', style: { justifyContent: 'center', marginTop: '10px', flexWrap: 'wrap' } },
+                h('button', { class: 'btn small', onclick: onImport }, icon('upload'), '导入卡'),
+                h('button', { class: 'btn small', onclick: () => openPanel('import') }, icon('import'), '从酒馆搬'))));
+        return;
+    }
+    for (const c of items) list.append(charItem(c));
 }
 
 function charItem(c) {
-    const active = state.char?.file === c.file;
-    const chats = active ? state.chatList.length : c.chats;
-    const lastChat = active && state.chatList[0] ? state.chatList[0].mtime : c.lastChat;
-    const sub = c.error ? `读取失败：${c.error}` : [chats ? `${chats} 个聊天` : '新角色', lastChat ? formatTime(lastChat) : '', (c.tags ?? []).slice(0, 3).join(' · ')].filter(Boolean).join(' · ');
+    const active = state.char?.file === c.file && state.view !== 'home';
     const el = h('div', {
         class: `char-item ${active ? 'active' : ''}`,
-        title: c.name,
+        title: c.error ? `读取失败：${c.error}` : c.name,
         onclick: async () => {
             if (c.error) return;
-            if (!active) await selectCharacter(c.file);
+            if (state.char?.file !== c.file) await selectCharacter(c.file);
+            else if (state.view === 'home') { state.view = 'chat'; refresh(['chat', 'topbar', 'sidebar']); }
             closeOnMobile();
         },
         oncontextmenu: (e) => { e.preventDefault(); charMenu(el, c); },
     },
-    h('img', { class: 'avatar', src: api.avatarUrl(c.file, Math.round(c.mtime ?? 0)), alt: '', loading: 'lazy', decoding: 'async' }),
+    charAvatar(c.error ? '' : c.file, 'avatar', { name: c.name }),
     h('div', { class: 'char-meta' },
-        h('div', { class: 'char-name' }, c.fav ? h('span', { style: { color: 'var(--accent)', marginRight: '4px' } }, '★') : null, c.name),
-        h('div', { class: 'char-sub' }, sub)),
+        h('div', { class: 'char-name' }, c.fav ? h('span', { class: 'fav-star' }, '★') : null, c.name)),
     iconBtn('more', '更多', (e) => { e.stopPropagation(); charMenu(e.currentTarget, c); }),
     );
     return el;
 }
 
-function charMenu(anchor, c) {
+export function charMenu(anchor, c) {
     popupMenu(anchor, [
         { label: '编辑角色卡', icon: 'edit', onClick: async () => { if (state.char?.file !== c.file) await selectCharacter(c.file); window.dispatchEvent(new CustomEvent('lt:open-panel', { detail: 'char' })); } },
         { label: c.fav ? '取消收藏' : '收藏', icon: 'star', onClick: () => toggleFav(c) },
@@ -137,12 +197,12 @@ async function deleteChar(c) {
     }
 }
 
-async function onImport() {
+export async function onImport() {
     const files = await pickFiles({ accept: '.png,.json,.jsonl', multiple: true });
     if (files.length) await importFiles(files);
 }
 
-async function onCreate() {
+export async function onCreate() {
     const name = await promptDialog('角色名字：', '', { title: '新建角色' });
     if (!name?.trim()) return;
     try {
@@ -157,47 +217,38 @@ async function onCreate() {
 }
 
 // ---------- 聊天记录 ----------
-function renderChats(root) {
-    const card = state.char.card.data;
-    const greetings = cardGreetings(state.char.card);
-    const head = h('div', { class: 'row', style: { padding: '10px 12px 6px' } },
-        h('img', { class: 'avatar sm', src: api.avatarUrl(state.char.file), alt: '' }),
-        h('div', { class: 'grow', style: { fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, card.name),
-        h('button', {
-            class: 'btn small primary',
-            onclick: async (e) => {
-                if (greetings.filter(Boolean).length > 1) {
-                    popupMenu(e.currentTarget, greetings.map((g, i) => ({
-                        label: `${i === 0 ? '默认开场白' : `备选开场白 ${i}`}：${String(g).replace(/\s+/g, ' ').slice(0, 24)}…`,
-                        onClick: async () => { await newChat({ greetingIndex: i }); closeOnMobile(); },
-                    })));
-                    return;
-                }
-                await newChat();
-                closeOnMobile();
-            },
-        }, icon('plus'), '新聊天'),
-    );
-    const list = h('div', { class: 'side-list' });
-    if (!state.chatList.length) list.append(h('div', { class: 'empty' }, '还没有聊天'));
+function renderChats(list) {
+    const name = state.char.card.data.name;
+    list.append(h('div', { class: 'section-title' },
+        h('span', { class: 'grow' }, `${name} 的聊天`),
+        h('span', {}, state.chatList.length || '')));
+    if (!state.chatList.length) list.append(h('div', { class: 'empty small', style: { padding: '10px' } }, '还没有聊天'));
     for (const c of state.chatList) {
-        const active = state.chat?.name === c.name;
+        const active = state.chat?.name === c.name && state.view !== 'home';
+        // 当前打开的聊天用内存里的消息，列表接口的条数和预览是打开那一刻的
+        const open = state.chat?.name === c.name ? state.chat.messages : null;
+        const count = open ? open.length : c.count;
+        const snippet = plainSnippet(open ? open[open.length - 1]?.mes : c.last, 60);
         const el = h('div', {
             class: `chat-item ${active ? 'active' : ''}`,
-            onclick: async () => { if (!active) await openChat(c.name); closeOnMobile(); },
+            title: c.name,
+            onclick: async () => {
+                if (state.chat?.name !== c.name) await openChat(c.name);
+                else if (state.view === 'home') { state.view = 'chat'; refresh(['chat', 'topbar', 'sidebar']); }
+                closeOnMobile();
+            },
             oncontextmenu: (e) => { e.preventDefault(); chatMenu(el, c); },
         },
         h('div', { class: 'grow' },
-            h('div', { class: 't' }, c.name),
-            h('div', { class: 'd' }, `${c.count >= 0 ? c.count + ' 条 · ' : ''}${formatTime(c.mtime)}${c.last ? ' · ' + c.last : ''}`)),
+            h('div', { class: 't' }, chatTitle(c.name, name)),
+            h('div', { class: 'd' }, [count >= 0 ? `${count} 条` : '', formatTime(open ? Date.now() : c.mtime), snippet].filter(Boolean).join(' · '))),
         iconBtn('more', '更多', (e) => { e.stopPropagation(); chatMenu(e.currentTarget, c); }),
         );
         list.append(el);
     }
-    root.append(head, list);
 }
 
-function chatMenu(anchor, c) {
+export function chatMenu(anchor, c) {
     popupMenu(anchor, [
         { label: '重命名', icon: 'edit', onClick: () => renameChat(c) },
         { label: '导出 JSONL（酒馆可直接导入）', icon: 'download', onClick: () => exportChat(c) },
@@ -206,7 +257,7 @@ function chatMenu(anchor, c) {
     ]);
 }
 
-async function renameChat(c) {
+export async function renameChat(c) {
     const to = await promptDialog('新名字：', c.name, { title: '重命名聊天' });
     if (!to?.trim() || to.trim() === c.name) return;
     try {
@@ -225,7 +276,7 @@ async function renameChat(c) {
     }
 }
 
-async function exportChat(c) {
+export async function exportChat(c) {
     try {
         const text = await api.getChat(state.char.id, c.name);
         downloadText(text, `${c.name}.jsonl`, 'application/jsonl');
@@ -234,7 +285,7 @@ async function exportChat(c) {
     }
 }
 
-async function deleteChat(c) {
+export async function deleteChat(c) {
     if (!await confirmDialog(`删除聊天「${c.name}」？\n会移到数据目录的 trash 里。`, { danger: true, okLabel: '删除' })) return;
     try {
         await api.deleteChat(state.char.id, c.name);
@@ -251,9 +302,10 @@ async function deleteChat(c) {
     }
 }
 
+/** 旧接口：以前左栏有“角色 / 聊天记录”两个标签，现在合在一起了 */
 export function setSidebarTab(t) {
-    tab = t;
-    renderSidebar();
+    if (t === 'chars') goHome();
+    else renderSidebar();
 }
 
 export { refreshLists };

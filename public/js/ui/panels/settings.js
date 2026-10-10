@@ -4,15 +4,29 @@ import { state, saveSettings } from '../../state.js';
 import { refresh } from '../../controller.js';
 import { field, numberInput, checkbox, select, textArea, section, collapsible, rangeRow } from '../form.js';
 
+let followSystem = null;
+
+/** 实际生效的深浅色（auto 时看系统） */
+export function resolvedTheme() {
+    const t = state.settings.theme;
+    if (t === 'light' || t === 'dark') return t;
+    return matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+}
+
 export function applyAppearance() {
     const ui = state.settings.ui;
     const root = document.documentElement;
-    root.dataset.theme = state.settings.theme === 'light' ? 'light' : 'dark';
+    const theme = resolvedTheme();
+    root.dataset.theme = theme;
     root.style.setProperty('--mes-font', `${Number(ui.fontSize) || 16}px`);
-    root.style.setProperty('--chat-width', `${Number(ui.chatWidth) || 860}px`);
-    document.body.classList.toggle('reader-font', !!ui.readerFont);
+    root.style.setProperty('--chat-width', `${Number(ui.chatWidth) || 780}px`);
     const meta = document.querySelector('meta[name="theme-color"]');
-    if (meta) meta.content = state.settings.theme === 'light' ? '#f5efe6' : '#171513';
+    if (meta) meta.content = theme === 'light' ? '#faf9f5' : '#262624';
+    try { localStorage.setItem('lt-theme', state.settings.theme || 'auto'); } catch { /* 无痕模式 */ }
+    if (!followSystem) {
+        followSystem = matchMedia('(prefers-color-scheme: dark)');
+        followSystem.addEventListener('change', () => { if (!['light', 'dark'].includes(state.settings.theme)) { applyAppearance(); refresh('topbar'); } });
+    }
 }
 
 export function render(body) {
@@ -25,10 +39,9 @@ export function render(body) {
     const rerender = () => { save(); refresh('chat'); };
 
     body.append(section('外观',
-        field('主题', select(s, 'theme', [{ value: 'dark', label: '深色' }, { value: 'light', label: '浅色' }], { onChange: () => { look(); refresh('topbar'); } })),
+        field('主题', select(s, 'theme', [{ value: 'auto', label: '跟随系统' }, { value: 'light', label: '浅色' }, { value: 'dark', label: '深色' }], { onChange: () => { look(); refresh('topbar'); } })),
         field('正文字号', rangeRow(ui, 'fontSize', { min: 12, max: 24, step: 0.5, onChange: look })),
         field('聊天区宽度（px）', rangeRow(ui, 'chatWidth', { min: 560, max: 1600, step: 20, onChange: look })),
-        checkbox(ui, 'readerFont', '正文用衬线字体（更像读小说）', { onChange: look }),
         checkbox(ui, 'showReasoning', '显示思维链（可折叠）', { onChange: rerender }),
         checkbox(ui, 'showMesId', '显示楼层号', { onChange: rerender }),
         checkbox(ui, 'renderFrontend', '渲染代码块里的前端界面（酒馆助手式状态栏/面板）', { onChange: rerender }),

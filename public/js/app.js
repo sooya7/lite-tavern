@@ -419,6 +419,8 @@ async function boot() {
     for (const ev of [event_types.MESSAGE_SENT, event_types.MESSAGE_RECEIVED, event_types.MESSAGE_DELETED, event_types.CHAT_CHANGED]) {
         eventSource.on(ev, () => renderTopbar());
     }
+    // 左栏当前聊天的条数和最后一句跟着变
+    for (const ev of [event_types.MESSAGE_RECEIVED, event_types.MESSAGE_DELETED]) eventSource.on(ev, () => renderSidebar());
     eventSource.on(event_types.MESSAGE_RECEIVED, () => rerenderIfActive('vars'));
     eventSource.on(event_types.MESSAGE_SWIPED, () => rerenderIfActive('vars'));
     eventSource.on(event_types.MESSAGE_EDITED, () => { rerenderIfActive('vars'); refreshSnapshots(); });

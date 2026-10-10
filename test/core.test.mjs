@@ -11,6 +11,8 @@ import { postProcessMessages, buildRequest, splitThinking, parseStreamEvent } fr
 import { writeCardPng, readCardJson, BLANK_PNG } from '../public/js/core/png.js';
 import { parseChatJsonl, serializeChat, addSwipe, setSwipe } from '../public/js/core/chat.js';
 import { VariableManager } from '../public/js/core/vars.js';
+import { extractFrontends } from '../public/js/ui/render.js';
+import { decodeScaled, encodePng, makeThumbnail } from '../server/thumb.mjs';
 
 const engine = new MacroEngine();
 const env = (over = {}) => {
@@ -215,4 +217,38 @@ test('角色卡 PNG 读写往返、聊天 JSONL 往返与 swipe', () => {
     assert.equal(m.swipes.length, 2);
     setSwipe(m, 0);
     assert.equal(m.mes, 'hi');
+});
+
+test('前端卡识别：单行 ``` 代码不算围栏；Windows 换行归一后能识别', () => {
+    const doc = '```html\n<!DOCTYPE html>\n<html><body>状态栏</body></html>\n```';
+    // 单行 ```…``` 后面再出现前端卡：只抽出真正的那一块，正文不被吞
+    const r1 = extractFrontends(`<time>\n\`\`\`公寓·20:30\`\`\`\n</time>\n正文第一段\n\n${doc}`);
+    assert.equal(r1.frontends.length, 1);
+    assert.ok(r1.text.includes('正文第一段'));
+    assert.ok(r1.frontends[0].startsWith('<!DOCTYPE html>'));
+    // formatMessage 会先把 \r\n 归一；这里直接验证归一后的文本
+    const crlf = `<Gui>\r\n${doc.replace(/\n/g, '\r\n')}\r\n</Gui>`;
+    assert.equal(extractFrontends(crlf).frontends.length, 0, '不归一时识别不出（说明归一是必要的）');
+    assert.equal(extractFrontends(crlf.replace(/\r\n?/g, '\n')).frontends.length, 1);
+});
+
+test('缩略图：PNG 解码、按块平均缩小、重新编码', () => {
+    const w = 40, h = 20, rgba = new Uint8Array(w * h * 4);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+        const o = (y * w + x) * 4;
+        rgba.set(x < w / 2 ? [255, 0, 0, 255] : [0, 0, 255, 255], o);
+    }
+    const png = encodePng({ width: w, height: h, rgba, alpha: false });
+    const small = decodeScaled(png, 10);
+    assert.equal(small.width, 20);
+    assert.equal(small.height, 10);
+    assert.equal(small.alpha, false);
+    assert.deepEqual([...small.rgba.slice(0, 4)], [255, 0, 0, 255]);
+    const last = (small.width * small.height - 1) * 4;
+    assert.deepEqual([...small.rgba.slice(last, last + 4)], [0, 0, 255, 255]);
+    // 带卡片元数据的 PNG：缩略图不再包含 tEXt 块
+    const card = writeCardPng(png, { spec: 'chara_card_v2', data: { name: 'x', description: 'y'.repeat(5000) } });
+    const thumb = makeThumbnail(Buffer.from(card), 10);
+    assert.ok(thumb.length < card.length);
+    assert.ok(!Buffer.from(thumb).includes(Buffer.from('tEXt')));
 });

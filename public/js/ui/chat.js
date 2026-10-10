@@ -1,6 +1,6 @@
-// 聊天区：消息列表、消息操作、输入框、顶栏
+// 聊天区：消息列表、消息操作、输入框、顶栏；没选角色或点了“角色库”时显示首页
 import { h, $, clear, icon, iconBtn, toast, confirmDialog, popupMenu, formatTime, modal } from './dom.js';
-import { state, eventSource, event_types, saveChat, saveSettings, activePersona } from '../state.js';
+import { state, eventSource, event_types, saveChat, saveSettings, activePersona, activeConnection } from '../state.js';
 import { api } from '../api.js';
 import { getSession, editMessage, deleteMessages, toggleHidden, branchChat, newChat, refresh } from '../controller.js';
 import { generate, stopGeneration } from '../generate.js';
@@ -8,6 +8,10 @@ import { formatMessage, mountFormatted, renderReasoning } from './render.js';
 import { mountFrontend, refreshSnapshots } from './frontend.js';
 import { messageText, setSwipe, deleteSwipe, ensureSwipes } from '../core/chat.js';
 import { parseSendDate } from '../core/util.js';
+import { renderHome } from './library.js';
+import { charAvatar, letterAvatar } from './avatars.js';
+import { chatTitle, startNewChat, goHome, renameChat, exportChat, deleteChat } from './sidebar.js';
+import { resolvedTheme, applyAppearance } from './panels/settings.js';
 
 const RENDER_WINDOW = 80;
 let renderFrom = 0;
@@ -38,18 +42,22 @@ function avatarFor(m) {
 }
 
 function avatarEl(m) {
+    const fa = typeof m.force_avatar === 'string' ? m.force_avatar : '';
+    if (!m.is_user && !(fa && DIRECT_URL.test(fa)) && state.char) return charAvatar(state.char.file, 'avatar', { name: m.name });
     const url = avatarFor(m);
     if (url) return h('img', { class: 'avatar', src: url, alt: '', loading: 'lazy' });
-    const letter = (m.name || '?').slice(0, 1);
-    return h('div', { class: 'avatar', style: { display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700, color: 'var(--muted)' } }, letter);
+    return letterAvatar(m.name, 'avatar');
 }
 
 export function renderChat() {
     const el = chatEl();
     if (!el) return;
     clear(el);
-    if (!state.char) {
-        el.append(welcome());
+    const home = state.view === 'home' || !state.char;
+    $('#center')?.classList.toggle('home', home);
+    if (home) {
+        renderHome(el);
+        if (scrollEl()) scrollEl().scrollTop = 0;
         return;
     }
     if (!state.chat) {
@@ -58,13 +66,15 @@ export function renderChat() {
     }
     const msgs = state.chat.messages;
     renderFrom = Math.max(0, msgs.length - RENDER_WINDOW);
-    if (renderFrom > 0) {
-        el.append(h('div', { style: { textAlign: 'center', padding: '8px' } },
-            h('button', { class: 'btn small', onclick: () => { renderFrom = Math.max(0, renderFrom - RENDER_WINDOW); rerenderFrom(); } }, `加载更早的 ${Math.min(RENDER_WINDOW, renderFrom)} 条`)));
-    }
+    if (renderFrom > 0) el.append(loadEarlierBtn(`加载更早的 ${Math.min(RENDER_WINDOW, renderFrom)} 条`));
     for (let i = renderFrom; i < msgs.length; i++) el.append(buildMessage(i));
     if (!msgs.length) el.append(h('div', { class: 'empty' }, '这张卡没有开场白，直接说点什么吧'));
     scrollToBottom(true);
+}
+
+function loadEarlierBtn(label) {
+    return h('div', { class: 'load-earlier' },
+        h('button', { class: 'btn small', onclick: () => { renderFrom = Math.max(0, renderFrom - RENDER_WINDOW); rerenderFrom(); } }, label));
 }
 
 function rerenderFrom() {
@@ -73,68 +83,56 @@ function rerenderFrom() {
     const keep = scrollEl().scrollTop;
     clear(el);
     const msgs = state.chat.messages;
-    if (renderFrom > 0) {
-        el.append(h('div', { style: { textAlign: 'center', padding: '8px' } },
-            h('button', { class: 'btn small', onclick: () => { renderFrom = Math.max(0, renderFrom - RENDER_WINDOW); rerenderFrom(); } }, `加载更早的消息`)));
-    }
+    if (renderFrom > 0) el.append(loadEarlierBtn('加载更早的消息'));
     for (let i = renderFrom; i < msgs.length; i++) el.append(buildMessage(i));
     scrollEl().scrollTop = keep + (scrollEl().scrollHeight - prevH);
-}
-
-function welcome() {
-    return h('div', { class: 'welcome' },
-        h('div', { class: 'welcome-logo' }, '酒'),
-        h('h1', {}, '轻酒馆'),
-        h('p', {}, '兼容酒馆的角色卡、预设、世界书、正则、EJS 模板与 MVU 变量的轻量前端'),
-        h('div', { class: 'steps' },
-            h('div', { class: 'step' }, h('b', {}, '1'), h('div', {}, '在右侧「连接」里填 API 地址和 Key（OpenAI 兼容 / Claude / Gemini）')),
-            h('div', { class: 'step' }, h('b', {}, '2'), h('div', {}, '左侧导入角色卡（PNG/JSON），或在「导入」里一键从酒馆搬数据')),
-            h('div', { class: 'step' }, h('b', {}, '3'), h('div', {}, '「预设」里导入你常用的对话补全预设，开聊')),
-        ),
-        h('div', { class: 'actions' },
-            h('button', { class: 'btn primary', onclick: () => window.dispatchEvent(new CustomEvent('lt:open-panel', { detail: 'import' })) }, icon('import'), '从酒馆导入'),
-            h('button', { class: 'btn', onclick: () => window.dispatchEvent(new CustomEvent('lt:open-panel', { detail: 'connection' })) }, icon('plug'), '配置连接'),
-        ),
-    );
 }
 
 function buildMessage(i, { streaming = false } = {}) {
     const m = state.chat.messages[i];
     const isLast = i === state.chat.messages.length - 1;
+    const user = !!m.is_user;
     const el = h('div', {
-        class: `mes ${m.is_user ? 'user' : 'char'} ${m.is_system ? 'hidden-msg' : ''} ${streaming ? 'streaming' : ''}`,
+        class: `mes ${user ? 'user' : 'char'} ${m.is_system ? 'hidden-msg' : ''} ${streaming ? 'streaming' : ''} ${isLast ? 'last' : ''}`,
         mesid: String(i),
-        is_user: String(!!m.is_user),
+        is_user: String(user),
         is_system: String(!!m.is_system),
         ch_name: m.name ?? '',
     });
     const time = parseSendDate(m.send_date);
+    const timeText = time ? formatTime(time) : '';
     const tools = h('div', { class: 'mes_tools' },
-        iconBtn('edit', '编辑', () => startEdit(i)),
         iconBtn('copy', '复制', () => copyMessage(i)),
+        iconBtn('edit', '编辑', () => startEdit(i)),
+        !user && isLast && !m.extra?.type ? iconBtn('refresh', '重新生成', () => generate('regenerate')) : null,
         iconBtn('more', '更多', (e) => messageMenu(e.currentTarget, i)),
     );
     const textEl = h('div', { class: 'mes_text' });
-    const block = h('div', { class: 'mes_block' },
-        h('div', { class: 'mes_head' },
-            h('span', { class: 'mes_name' }, m.name ?? ''),
-            m.is_system ? h('span', { class: 'tag' }, '已隐藏') : null,
-            h('span', { class: 'mes_time' }, time ? formatTime(time) : ''),
-            state.settings.ui.showMesId ? h('span', { class: 'mes_id' }, `#${i}`) : null,
-            tools,
-        ),
-        h('div', { class: 'reasoning-slot' }),
-        textEl,
-    );
-    const swipeCount = Array.isArray(m.swipes) && m.swipes.length ? m.swipes.length : 1;
-    if (!m.is_user && !m.extra?.type && (isLast || swipeCount > 1)) {
-        block.append(h('div', { class: 'swipes' },
-            iconBtn('left', '上一个', () => swipe(i, -1)),
-            h('span', {}, `${Math.min(m.swipe_id ?? 0, swipeCount - 1) + 1}/${swipeCount}`),
-            iconBtn('right', isLast ? '下一个 / 重新生成' : '下一个', () => swipe(i, 1)),
-        ));
+    const hiddenTag = m.is_system ? h('span', { class: 'tag' }, '已隐藏') : null;
+    const idTag = state.settings.ui.showMesId ? h('span', { class: 'mes_id' }, `#${i}`) : null;
+    const foot = h('div', { class: 'mes_foot' });
+    if (user) {
+        foot.append(...[h('span', { class: 'mes_meta' }, [m.name, timeText].filter(Boolean).join(' · ')), idTag, hiddenTag, tools].filter(Boolean));
+        el.append(h('div', { class: 'mes_block' }, h('div', { class: 'mes_bubble' }, textEl), foot));
+    } else {
+        const swipeCount = Array.isArray(m.swipes) && m.swipes.length ? m.swipes.length : 1;
+        if (!m.extra?.type && (isLast || swipeCount > 1)) {
+            foot.append(h('div', { class: 'swipes' },
+                iconBtn('left', '上一个', () => swipe(i, -1)),
+                h('span', {}, `${Math.min(m.swipe_id ?? 0, swipeCount - 1) + 1}/${swipeCount}`),
+                iconBtn('right', isLast ? '下一个 / 重新生成' : '下一个', () => swipe(i, 1)),
+            ));
+        }
+        foot.append(tools);
+        el.append(
+            h('div', { class: 'mes_head' },
+                avatarEl(m),
+                h('span', { class: 'mes_name' }, m.name ?? ''),
+                h('span', { class: 'mes_time' }, timeText),
+                idTag, hiddenTag),
+            h('div', { class: 'mes_block' }, h('div', { class: 'reasoning-slot' }), textEl, foot),
+        );
     }
-    el.append(avatarEl(m), block);
     fillMessage(el, i, { streaming });
     return el;
 }
@@ -160,8 +158,8 @@ async function fillMessage(el, i, { streaming = false } = {}) {
     const res = formatMessage(text, { charName: session.names.char, isUser: m.is_user });
     const allowFrontend = state.settings.ui.renderFrontend !== false && !streaming;
     mountFormatted(textEl, res, allowFrontend ? (html, wrap) => mountFrontend(html, wrap, i) : null);
-    clear(slot);
-    if (state.settings.ui.showReasoning && m.extra?.reasoning) {
+    if (slot) clear(slot);
+    if (slot && state.settings.ui.showReasoning && m.extra?.reasoning) {
         let rsn = m.extra.reasoning;
         if (!streaming) rsn = await session.displayText(i, { reasoning: true });
         if (el._renderToken !== token) return;
@@ -298,10 +296,19 @@ export function renderComposer() {
     const root = $('#composer');
     clear(root);
     const status = h('div', { class: 'gen-status', id: 'gen-status' });
-    textarea = h('textarea', { id: 'send_textarea', rows: 1, placeholder: matchMedia('(pointer: coarse)').matches || !state.settings.ui.enterToSend ? '说点什么…' : '说点什么…（Enter 发送，Shift+Enter 换行）' });
-    const sendBtn = h('button', { class: 'icon-btn send-btn primary', id: 'send_but', title: '发送', onclick: onSend }, icon('send'));
-    const moreBtn = iconBtn('more', '更多操作', (e) => composerMenu(e.currentTarget));
-    root.append(status, h('div', { class: 'composer-inner' }, moreBtn, textarea, sendBtn));
+    const coarse = matchMedia('(pointer: coarse)').matches;
+    textarea = h('textarea', { id: 'send_textarea', rows: 1, placeholder: coarse || !state.settings.ui.enterToSend ? '说点什么…' : '说点什么…（Enter 发送，Shift+Enter 换行）' });
+    const sendBtn = h('button', { class: 'icon-btn send-btn primary', id: 'send_but', type: 'button', title: '发送', 'aria-label': '发送', onclick: onSend }, icon('arrowUp'));
+    const moreBtn = iconBtn('plus', '更多操作', (e) => composerMenu(e.currentTarget), 'tool');
+    const bar = h('div', { class: 'composer-bar' },
+        moreBtn,
+        h('button', { class: 'chip preset', type: 'button', id: 'composer-preset', title: '对话补全预设', onclick: () => openPanel('preset') }),
+        h('div', { class: 'grow' }),
+        h('button', { class: 'chip model', type: 'button', id: 'composer-model', title: '切换 API 连接', onclick: (e) => connectionMenu(e.currentTarget) }),
+        sendBtn);
+    const box = h('div', { class: 'composer-box' }, textarea, bar);
+    box.addEventListener('mousedown', (e) => { if (e.target === box) { e.preventDefault(); textarea.focus(); } });
+    root.append(status, box);
     const fit = () => { textarea.style.height = 'auto'; textarea.style.height = `${Math.min(textarea.scrollHeight, window.innerHeight * 0.4)}px`; };
     textarea.addEventListener('input', fit);
     textarea.addEventListener('keydown', (e) => {
@@ -311,6 +318,49 @@ export function renderComposer() {
             onSend();
         }
     });
+    updateComposerChips();
+    if (!chipsHooked) {
+        // 连接 / 预设面板里的改动（改模型名、切连接、换预设）都会冒泡到 #right，统一刷新标签
+        chipsHooked = true;
+        let raf = 0;
+        const later = () => { cancelAnimationFrame(raf); raf = requestAnimationFrame(updateComposerChips); };
+        for (const ev of ['input', 'change', 'click']) $('#right')?.addEventListener(ev, later);
+    }
+}
+let chipsHooked = false;
+
+const openPanel = (id) => window.dispatchEvent(new CustomEvent('lt:open-panel', { detail: id }));
+
+/** 输入框工具条上的“预设 / 模型”小标签 */
+export function updateComposerChips() {
+    const presetChip = $('#composer-preset');
+    if (presetChip) presetChip.replaceChildren(icon('sliders'), h('span', { class: 'chip-t' }, state.preset?.name ?? '预设'));
+    const modelChip = $('#composer-model');
+    if (modelChip) {
+        const conn = state.settings.connections.length ? activeConnection() : null;
+        modelChip.replaceChildren(h('span', { class: 'chip-t' }, conn ? (conn.model || conn.name) : '配置连接'), icon('chevronDown'));
+    }
+}
+
+function connectionMenu(anchor) {
+    const s = state.settings;
+    if (!s.connections.length) { openPanel('connection'); return; }
+    const cur = activeConnection();
+    popupMenu(anchor, [
+        ...s.connections.map(c => ({
+            label: `${c.name}${c.model ? ` · ${c.model}` : ''}`,
+            icon: 'plug',
+            current: c.id === cur.id,
+            onClick: () => {
+                s.activeConnection = c.id;
+                saveSettings();
+                updateComposerChips();
+                refresh('panels');
+            },
+        })),
+        '-',
+        { label: '管理连接…', icon: 'settings', onClick: () => openPanel('connection') },
+    ]);
 }
 
 function onSend() {
@@ -339,7 +389,7 @@ export function setGenerating(on) {
     btn.classList.toggle('stop', on);
     btn.classList.toggle('primary', !on);
     btn.title = on ? '停止' : '发送';
-    btn.replaceChildren(icon(on ? 'stop' : 'send'));
+    btn.replaceChildren(icon(on ? 'stop' : 'arrowUp'));
     if (!on) chatEl()?.querySelectorAll('.mes.streaming').forEach(e => e.classList.remove('streaming'));
 }
 
@@ -365,26 +415,44 @@ export function renderTopbar() {
     const bar = $('#topbar');
     clear(bar);
     const app = $('#app');
-    bar.append(iconBtn('menu', '角色列表', () => window.dispatchEvent(new CustomEvent('lt:toggle-left'))));
-    if (state.char) {
+    bar.append(iconBtn('panelLeft', '角色列表', () => window.dispatchEvent(new CustomEvent('lt:toggle-left')), 'toggle-left'));
+    if (state.char && state.view !== 'home') {
         const card = state.char.card.data;
-        bar.append(h('div', { class: 'title' },
-            h('img', { class: 'avatar sm', src: api.avatarUrl(state.char.file, state.char.v), alt: '' }),
-            h('div', { style: { minWidth: 0 } },
-                h('div', { class: 'n' }, card.name),
-                h('div', { class: 's' }, `${state.preset?.name ?? ''}${state.chat ? ' · ' + state.chat.messages.length + ' 条' : ''}`))));
+        const sub = state.chat ? chatTitle(state.chat.name, card.name) : '';
+        bar.append(h('button', { class: 'title-btn', title: '聊天操作', onclick: (e) => titleMenu(e.currentTarget) },
+            charAvatar(state.char.file, 'avatar', { name: card.name }),
+            h('span', { class: 'n' }, card.name),
+            sub ? h('span', { class: 's' }, `/ ${sub}`) : null,
+            icon('chevronDown')));
     } else {
-        bar.append(h('div', { class: 'title' }, h('div', { class: 'n' }, '轻酒馆')));
+        bar.append(h('div', { class: 'title-plain' }, state.characters.length ? '角色库' : '轻酒馆'));
     }
     bar.append(
-        iconBtn(state.settings.theme === 'light' ? 'moon' : 'sun', '切换深浅色', () => {
-            state.settings.theme = state.settings.theme === 'light' ? 'dark' : 'light';
-            document.documentElement.dataset.theme = state.settings.theme;
-            saveSettings();
+        h('div', { class: 'spacer' }),
+        iconBtn(resolvedTheme() === 'light' ? 'moon' : 'sun', '切换深浅色', () => {
+            state.settings.theme = resolvedTheme() === 'light' ? 'dark' : 'light';
+            applyAppearance();
+            saveSettings({ now: true });
             renderTopbar();
         }),
-        iconBtn('sidebar', '设置面板', () => window.dispatchEvent(new CustomEvent('lt:toggle-right')), app.classList.contains('right-closed') ? '' : 'active'),
+        iconBtn('panelRight', '设置面板', () => window.dispatchEvent(new CustomEvent('lt:toggle-right')), app.classList.contains('right-closed') ? '' : 'active'),
     );
+    updateComposerChips();
+}
+
+function titleMenu(anchor) {
+    const c = state.chat && state.chatList.find(x => x.name === state.chat.name);
+    popupMenu(anchor, [
+        { label: '新聊天', icon: 'plus', onClick: () => startNewChat(anchor) },
+        c ? { label: '重命名这个聊天', icon: 'edit', onClick: () => renameChat(c) } : null,
+        c ? { label: '导出 JSONL（酒馆可直接导入）', icon: 'download', onClick: () => exportChat(c) } : null,
+        '-',
+        { label: '编辑角色卡', icon: 'idCard', onClick: () => openPanel('char') },
+        { label: '本聊天的设置（作者注释等）', icon: 'note', onClick: () => openPanel('note') },
+        { label: '回到角色库', icon: 'users', onClick: () => goHome() },
+        c ? '-' : null,
+        c ? { label: '删除这个聊天', icon: 'trash', danger: true, onClick: () => deleteChat(c) } : null,
+    ]);
 }
 
 export { refresh };

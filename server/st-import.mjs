@@ -40,6 +40,14 @@ function assertStDir(dir) {
     return p;
 }
 
+/** 复制后把修改时间改回源文件的，列表里的“最近使用”排序才不会全变成导入那一刻 */
+async function keepMtime(src, dest) {
+    try {
+        const st = await fsp.stat(src);
+        await fsp.utimes(dest, st.atime, st.mtime);
+    } catch { /* 时间戳只影响排序 */ }
+}
+
 const listFiles = async (dir, re) => {
     try { return (await fsp.readdir(dir)).filter(f => re.test(f)); } catch { return []; }
 };
@@ -91,6 +99,7 @@ export async function importFromSt(store, sel) {
             const dest = store.p('worlds', `${sanitizeName(name)}.json`);
             if (fs.existsSync(dest) && !sel.overwrite) { report.skipped.push(`世界书 ${name}（已存在）`); continue; }
             await fsp.copyFile(src, dest);
+            await keepMtime(src, dest);
             report.worlds.push(name);
         } catch (e) { report.errors.push(`世界书 ${name}: ${e.message}`); }
     }
@@ -105,6 +114,7 @@ export async function importFromSt(store, sel) {
             delete j.proxy_password;
             delete j.reverse_proxy;
             await store.writeAtomic(dest, JSON.stringify(j, null, 2));
+            await keepMtime(src, dest);
             report.presets.push(name);
         } catch (e) { report.errors.push(`预设 ${name}: ${e.message}`); }
     }
@@ -117,6 +127,7 @@ export async function importFromSt(store, sel) {
             const bytes = await fsp.readFile(path.join(root, 'characters', file));
             // 酒馆里卡已关联世界书文件时不重复生成
             const { card } = await store.importCard(bytes, file, { importBook: true, targetFile: destFile });
+            await keepMtime(path.join(root, 'characters', file), store.p('characters', destFile));
             report.characters.push(card.data.name);
             if (sel.withChats) {
                 const srcDir = path.join(root, 'chats', id);
@@ -126,6 +137,7 @@ export async function importFromSt(store, sel) {
                     const d = path.join(destDir, c);
                     if (fs.existsSync(d) && !sel.overwrite) continue;
                     await fsp.copyFile(path.join(srcDir, c), d);
+                    await keepMtime(path.join(srcDir, c), d);
                     report.chats++;
                 }
             }
