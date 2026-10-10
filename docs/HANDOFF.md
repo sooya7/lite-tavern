@@ -123,6 +123,30 @@ docs/HANDOFF.md         本文档
 
 **交给脚本的提示词消息**：`CHAT_COMPLETION_PROMPT_READY` / `GENERATE_AFTER_DATA` / `CHAT_COMPLETION_SETTINGS_READY` 里的消息只有 `role` / `content` / `name`（`generate.js` 的 `plainMessages`），不带内部的来源标记；监听者没改就沿用原来那份，改了就用它的（`adoptMessages`）。`GENERATE_AFTER_DATA` 必须在拼请求体之前发：新版酒馆上合并消息的脚本只听它。
 
+## 3.6 与酒馆 / Luker 共用数据（2026-10-10）
+
+- 启动参数 `--st-data <酒馆用户数据目录>`（或环境变量 `LT_ST_DATA`）：`characters` / `chats` / `worlds` 对应同名目录，预设对应 `OpenAI Settings`，直接读写酒馆那一份。设置、密钥、头像、备份、回收站、缓存仍在自己的 `--data` 里。`/api/ping` 的 `shared` 字段显示共用目录
+- 版本检查：聊天、角色卡、预设、世界书读时记版本（文件 mtime 毫秒 + 大小，响应头 `X-Version`），保存带 `X-Expect`，对不上返回 409（聊天 `chat-conflict`，其余 `conflict`），前端弹窗「载入最新的 / 用这边的覆盖」，覆盖前留备份。新建、导入覆盖不带版本号不查；聊天文件已存在却没带版本号一律拒绝。同一文件的保存在前端排队（`api.js` 的 `versions` / `saving`）
+- 校验标记：共用模式下每次写聊天都换 `chat_metadata.integrity`，并更新 Luker 的 `<聊天名>.luker-state.chat_sync.json`（已存在才更新）；先写聊天后写标记（`stampIntegrity`、`rotateSyncSidecar`）。改名 / 删除聊天时带上 `<聊天名>.luker-state.*.json`
+- 旧页面挡住：除 `/api/login`、`/api/llm/*` 外，非 GET 请求必须带 `X-LT-Client: 2`（`server.mjs` 的 `CLIENT_PROTOCOL`、`api.js` 的 `PROTOCOL`），否则 409 `stale-client`。**用 curl 调接口要带这个头**。共用模式必须和这条检查一起上
+- 导入 API 连接：`/api/st/import` 的 `connections` 选项读酒馆 `settings.json` 的 `extension_settings.connectionManager.profiles` 和 `secrets.json`，Key 只在服务端搬；有 `secret-id` 只认那一个 Key，找不到宁可留空；已有连接靠 `stProfile` 或“同地址同模型”认出，`overwrite: true` 才按酒馆更新
+- 工具：`tools/st-roundtrip-check.mjs <目录>` 只读体检（存回去是否丢字段）；`tools/fake-st-dir.mjs` 造假酒馆目录给端到端用
+- 共用的边界：连接和密钥、全局正则、用户设定、全局变量、全局启用的世界书不共用。角色卡 / 世界书 / 预设在 Luker 那边没有冲突检查，规矩是**一边改完，另一边先刷新再改**
+
+### 关于 Luker 必须知道的事（读它的源码得出的，容器里 `src/endpoints/chats.js`）
+
+- Luker 是 `funnycups/Luker` v2.8.0，SillyTavern 的分支，Docker 容器 `luker`，数据在 `/opt/luker/data/admin`。
+- **聊天不是整存整取**：客户端发补丁（`/patch`、`/append`），服务端打到磁盘文件上。所以别的程序改了聊天文件而它不知道，会出乱子。保护机制是 integrity 标记：
+  - 标记存在聊天旁边的 `<聊天名>.luker-state.chat_sync.json`（`{integrity, updated_at}`），**以它为准**；这个文件不存在才看聊天第一行的 `chat_metadata.integrity`，并据此建出这个文件。
+  - Luker 每次写聊天都会换标记。客户端带着旧标记来保存会收到冲突，然后走它自己的恢复流程。
+  - 我们的做法（已实现）就是每次写聊天都把两处标记一起换掉。**这条路径只读过代码，没在真的 Luker 界面里演练过**，上线后找一个无关紧要的聊天试一下：Luker 开着它 → 轻酒馆里发一句 → 回 Luker 再发一句，应该看到 Luker 提示冲突或自动重载，而不是把轻酒馆那句吞掉。
+- 聊天旁边还有别的附属文件（`memory_graph__meta`、`luker_orchestrator_anchors__schema`、`luker_search_tools_anchors__meta`），是 Luker 扩展的数据。轻酒馆改名 / 删除聊天时会带上它们，但**在轻酒馆里删改楼层，这些数据不会跟着更新**。
+- Luker 的“最近聊天”列表是进程内存里的索引，轻酒馆新建的聊天要等 Luker 重启才会出现在那个列表里（角色自己的聊天列表是读磁盘的，不受影响）。
+- 角色卡缓存按文件 mtime 失效，头像缩略图在原图更新时会重新生成，这两样不用管。
+- 预设：Luker 把**当前预设的值存在自己的 `settings.json` 里**，预设文件只在点保存时才写。所以轻酒馆改了预设文件，Luker 要重新选一次这个预设才生效。
+- 角色卡 / 世界书 / 预设在 Luker 那边没有冲突检查：它拿着旧内容保存会直接盖掉轻酒馆的修改。轻酒馆这边能发现并提示，Luker 那边不能。给用户的规矩是：**一边改完，另一边先刷新页面再改**。
+- Luker 的 `secrets.json`：`api_key_custom` 是 36 个 `{id, value, label, active}`，其中约一半 `value` 是空的；另有 2 个 `api_key_deepseek`。只有 9 个 Key 挂在连接配置上，其余的没有对应地址，没法迁成连接——告诉用户。**任何时候都不要把 Key 的值打印出来。**
+
 ## 4. 数据与兼容约定
 
 - 数据目录结构与酒馆对应：`characters/*.png`、`chats/<角色>/*.jsonl`、`presets/*.json`、`worlds/*.json`、`avatars/`；另有 `settings.json`、`secrets.json`、`backups/`、`trash/`
@@ -134,6 +158,8 @@ docs/HANDOFF.md         本文档
 ## 5. 当前状态（已验证的部分）
 
 - `npm test`：21 项核心单元测试全过（宏、正则、世界书、EJS、MVU、变量、提示词组装、接口格式、PNG/JSONL 往返、前端卡识别、缩略图、设置面板结构与搜索清单；脚本库的规范化与起停判断、MVU 事件流程与不发事件的路径结果一致、状态栏占位符、酒馆助手数据格式来回转换、导入角色卡时世界书和脚本的去向）
+- 2026-10-10 共用模式：单测 24/24、端到端 31/31（含共用导入、聊天冲突三种选法、预设冲突、旧页面拦截）；Luker 真实数据只读体检通过（角色卡 25、世界书 33、预设 6、聊天 22 存回去不丢字段）。**Luker 界面里的冲突提示没在真界面演练过**
+- 跑端到端：沙箱 / 有 HTTP 代理的环境要设 `NO_PROXY=127.0.0.1,localhost`（否则 `mock()` 的 urllib 走代理 404）；下载不了 Playwright 的 Chromium 时设 `LT_CHROMIUM=/usr/bin/chromium` 用系统浏览器
 - 端到端（无头 Chromium + 假模型）26/26 通过，含“中途停止”、设置面板 4 组 12 区逐个打开、搜索清单逐项定位、各菜单的条目、手机上顶栏文字和预设切换；脚本 5 项：导入带脚本的卡后世界书 / 正则 / 脚本自动就位并运行、MVU 事件和变量结构、脚本按钮与脚本变量、脚本自己调模型、面板开关与停掉后的清理、换角色 / 换预设跟着起停、预设脚本改请求和注入提示词、脚本的设置界面、刷新后恢复。注意每次跑前要重启 `mock-llm.mjs`：429 / 错误正文用例是“每个进程只触发一次”，复用旧进程会误报“没有重试”
 - 端到端不需要外网：zod 和 `mvu_zod.js` 用 `tools/e2e.py` 里的替身顶上，jsdelivr 的其余请求直接掐掉。真库的行为要在能联网的地方另外验证（见下面 2026-10-10 的脚本实测）
 - 2026-10-10 用 117 服务器上 Luker 的真实数据实测（导入 25 角色 / 22 聊天 / 6 预设 / 33 世界书 / 10 正则，0 错误）：
@@ -193,13 +219,16 @@ docs/HANDOFF.md         本文档
 
 ## 9. 117 服务器上的常驻服务（2026-10-10）
 
-- 代码 `/opt/lite-tavern/app`，数据 `/opt/lite-tavern/data`（属主 ubuntu），从 `/opt/luker/data/admin` 只读导入
+- 代码 `/opt/lite-tavern/app`，数据 `/opt/lite-tavern/data`（属主 ubuntu）
+- **2026-10-10 12:43 起共用模式**：`--st-data /opt/luker/data/admin`，角色卡 / 聊天 / 世界书 / 预设直接用 Luker 那份。服务单元的 `ReadWritePaths` 加了这四个目录（`ProtectSystem=strict` 下不加就是只读，保存会失败）；Luker 的 `settings.json` / `secrets.json` 不在可写范围内。`/opt/lite-tavern/data` 里原来的 characters / chats / worlds / presets 不再使用，留作快照没删
+- 上线前备份（`/opt/lite-tavern/`）：`app.bak-20261010-before-share.tgz`、`luker-data.bak-20261010-before-share.tgz`（Luker 四个目录，79 MB）、`lite-tavern.service.bak-20261010`、`settings.bak-20261010-before-api.json`
+- 已从 Luker 迁入 9 条连接（sooya、gg、gemini-3.7-flash、new、奶龙、yyz、幻想乡、cat、缥缈）；原「Luker 中转」c_luker01 被认成 cat、后处理 strict。上线时 `/models` 检查：缥缈 522（上游问题），其余 200。Luker 里另有二十来个没挂连接配置的 Key 没迁
 - 外网入口：**https://117.72.216.74:8446/**，按用户明确要求不加访问密码。拿到地址的人可以读取 / 修改数据并使用配置好的模型连接
 - Node 仍只监听 `127.0.0.1:8730`，nginx 在 8446 提供 HTTPS 反向代理；`/api/llm/` 关闭响应缓冲、请求缓冲和 gzip，超时 3600 秒，保证长回复流式返回
 - 常驻 systemd 单元 `lite-tavern.service`，已开机自启；用户 ubuntu，`Restart=on-failure`、MemoryMax=320M、`ProtectSystem=strict`，仅允许写 `/opt/lite-tavern/data`。旧临时单元 `lite-tavern-test` 已停用
 - 现行部署配置已保存到仓库：[`deploy/lite-tavern.service`](deploy/lite-tavern.service) 对应 `/etc/systemd/system/lite-tavern.service`；[`deploy/lite-tavern.nginx.conf`](deploy/lite-tavern.nginx.conf) 对应 `/etc/nginx/sites-available/lite-tavern`，由 `/etc/nginx/sites-enabled/lite-tavern` 链接启用
 - 与 Luker 共用 `/opt/luker/acme/config/live/luker-ip/` 的受信任 IP 证书；`luker-ip-cert-renew.timer` 每 8 小时检查续期并重载 nginx
-- 连接“Luker 中转”的 Key 从 Luker 的 secrets.json 复制到 `data/secrets.json`（0600），不在仓库和文档里
+- 连接的 Key 都在 `data/secrets.json`（0600），不在仓库和文档里
 - 查看状态：`ssh kaze1 'systemctl status lite-tavern --no-pager'`；查看日志：`ssh kaze1 'journalctl -u lite-tavern -n 100 --no-pager'`
 - 更新代码：本地 `tar --exclude=.git --exclude=data -czf - . | ssh kaze1 'tar -xzf - -C /opt/lite-tavern/app'`，再 `ssh kaze1 'systemctl restart lite-tavern'`。更改 nginx 配置后先 `nginx -t`，再重载 nginx
 - 也可以让服务器直接从 GitHub 取（仓库是公开的，服务器上没有推送凭据，只能拉）：`git clone --depth 1 -b <分支> https://github.com/sooya7/lite-tavern /tmp/lt-src`，再把 `public server server.mjs package.json README.md docs test tools` 同步到 `/opt/lite-tavern/app` 并重启。2026-10-10 的入口整理就是这样部署的

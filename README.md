@@ -24,6 +24,8 @@ node server.mjs --port 8730 --host 0.0.0.0 --password 你的密码 --data D:/lt-
 
 开放到局域网时务必加 `--password`。
 
+与酒馆 / Luker 共用数据：加 `--st-data <酒馆用户数据目录>`（如 `data/default-user`），角色卡、聊天、世界书、预设直接读写那一份，两边同时改同一个文件时会弹窗让你选。连接和 Key 可在 设置 › 导入 里从酒馆搬过来。细节见交接文档 3.6 节。
+
 ## 测试
 
 ```bash
@@ -33,6 +35,7 @@ node tools/check-imports.mjs     # 前端模块导入导出静态检查
 node tools/mock-llm.mjs 8799
 node server.mjs --port 8731 --data <空目录>
 python tools/e2e.py
+# 连共用模式一起测：见 tools/e2e.py 开头的说明（LT_SHARED_URL / LT_SHARED_DIR / LT_SHARED_OWN）
 ```
 
 详细的结构、现状和后续工作见 [docs/HANDOFF.md](docs/HANDOFF.md)。

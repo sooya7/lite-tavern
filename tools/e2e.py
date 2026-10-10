@@ -5,6 +5,7 @@
 #   python tools/e2e.py
 # 想连“与酒馆共用数据”一起测：node tools/fake-st-dir.mjs <目录> 造一个假的酒馆数据目录，另起一个实例
 #   node server.mjs --port 8732 --data <另一个空目录> --st-data <目录>
+# 有 HTTP 代理的环境加 NO_PROXY=127.0.0.1,localhost；用系统 Chromium 时加 LT_CHROMIUM=/usr/bin/chromium。
 # 再带上 LT_SHARED_URL=http://127.0.0.1:8732 LT_SHARED_DIR=<目录> LT_SHARED_OWN=<另一个空目录> 跑。
 import json
 import os
@@ -174,7 +175,7 @@ def assert_in(needle, hay, what=''):
 def main():
     global page
     with sync_playwright() as p:
-        browser = p.chromium.launch()
+        browser = p.chromium.launch(executable_path=os.environ.get('LT_CHROMIUM') or None)
         ctx = browser.new_context(viewport={'width': 1440, 'height': 900}, locale='zh-CN')
 
         def offline_cdn(context):
