@@ -22,6 +22,7 @@ MOCK = os.environ.get('MOCK_URL', 'http://127.0.0.1:8799')
 SHOTS = os.environ.get('LT_SHOTS', os.path.join(os.environ.get('TEMP', '/tmp'), 'lt-shots'))
 FIXTURE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures', 'test-card.json')
 SCRIPT_CARD = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures', 'script-card.json')
+OPENING_CARD = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures', 'opening-card.json')
 SCRIPT_PRESET = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures', 'script-preset.json')
 # 共用酒馆数据目录的那几项：另起一个带 --st-data 的实例，三个都给了才跑
 SHARED_URL = os.environ.get('LT_SHARED_URL', '')
@@ -1304,6 +1305,40 @@ def main():
             mp.screenshot(path=os.path.join(SHOTS, '15-mobile-search-jump.png'))
             mctx.close()
         run('手机布局（390px）', mobile)
+
+        def opening_bridge():
+            # 开场选择这类卡：界面（沙箱里）先问酒馆“现在是哪个聊天”、读首楼的全部开场，再在父页面上发一个自定义事件，
+            # 卡自带的脚本接住后切开场、把身份填进输入框，结果通过 detail.result 传回界面
+            page.locator('#left button', has_text='首页').first.click()
+            page.wait_for_selector('#chat .home-wrap')
+            page.locator('#chat .home-tab', has_text='角色库').click()
+            page.locator('#chat .home-tab-actions button', has_text='导入').click()
+            with page.expect_file_chooser() as fc:
+                page.locator('.menu button', has_text='从文件导入').click()
+            fc.value.set_files(OPENING_CARD)
+            page.wait_for_selector('#toasts .toast >> text=已导入角色「开场选择卡」', timeout=10000)
+            page.wait_for_selector('#chat .mes[mesid="0"] iframe', timeout=10000)
+            page.wait_for_function('() => window.__e2eOpeningReady === true', timeout=15000)
+            frame = page.frame_locator('#chat .mes[mesid="0"] iframe')
+            frame.locator('#st', has_text='就绪 同一个聊天').wait_for(timeout=8000)
+            chat_name = page.evaluate('window.SillyTavern.getContext().getCurrentChatId()')
+            assert chat_name, '宿主页面上拿不到聊天名'
+            # 没有脚本接的事件：界面等到的是一句说得清的失败，不是一直转
+            frame.locator('#lonely').click()
+            frame.locator('#st', has_text='出错：页面上没有脚本接这个事件').wait_for(timeout=8000)
+            first = page.evaluate('window.TavernHelper.getChatMessages(0, { include_swipes: true })[0]')
+            assert first['swipe_id'] == 0 and len(first['swipes']) == 3, first
+            # 有脚本接的事件：首楼切到第 3 个开场，身份进了输入框（不自动发送）
+            frame.locator('#go').click()
+            page.wait_for_function("() => window.__e2eOpening === '已检票上车 2'", timeout=10000)
+            page.wait_for_function("() => document.querySelector('#chat .mes[mesid=\"0\"] .mes_text').innerText.includes('第二种开场')", timeout=8000)
+            assert page.evaluate('window.TavernHelper.getChatMessages(0, { include_swipes: true })[0].swipe_id') == 2
+            assert page.input_value('#send_textarea') == '我的身份：乘客', page.input_value('#send_textarea')
+            assert mes_count() == 1, '检票只切开场，不该多出消息'
+            assert page.evaluate('window.SillyTavern.getContext().getCurrentChatId()') == chat_name
+            page.fill('#send_textarea', '')
+            shot('19-opening-bridge')
+        run('前端卡：界面在页面上发事件叫卡自带的脚本干活（开场选择），拿得到聊天名和首楼的全部开场', opening_bridge)
 
         # ---------- 与酒馆共用数据目录（另起的一个实例：--st-data 指向一个假的酒馆目录） ----------
         if SHARED_URL and SHARED_DIR:

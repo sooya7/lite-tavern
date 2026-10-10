@@ -1,0 +1,84 @@
+{
+ "spec": "chara_card_v3",
+ "spec_version": "3.0",
+ "data": {
+  "name": "开场选择卡",
+  "description": "用来测“界面在页面上发事件、卡自带的脚本接住”的卡。",
+  "personality": "",
+  "scenario": "",
+  "first_mes": "请选一个开场。\n<开场选择/>",
+  "mes_example": "",
+  "creator_notes": "",
+  "system_prompt": "",
+  "post_history_instructions": "",
+  "alternate_greetings": [
+   "第一种开场\n<initvar>\n{\"路线\":\"一\"}\n</initvar>",
+   "第二种开场，列车开动了。\n<initvar>\n{\"路线\":\"二\"}\n</initvar>"
+  ],
+  "tags": [],
+  "creator": "e2e",
+  "character_version": "1.0",
+  "extensions": {
+   "talkativeness": "0.5",
+   "fav": false,
+   "regex_scripts": [
+    {
+     "id": "e2e-opening-ui",
+     "scriptName": "开场选择界面",
+     "findRegex": "<开场选择/>",
+     "replaceString": "```html\n<!doctype html><html><body>\n<button id=\"go\">检票</button> <button id=\"lonely\">没人接的事件</button>\n<div id=\"st\">待选</div>\n<script>\nconst st = document.getElementById('st');\nfunction hostId() {\n  const host = window.parent?.SillyTavern || window.SillyTavern;\n  if (typeof host?.getContext !== 'function') throw new Error('酒馆上下文尚未就绪。');\n  return host.getContext().getCurrentChatId();\n}\nasync function fire(type, target) {\n  try {\n    const chatId = hostId();\n    if (!chatId) throw new Error('拿不到聊天名');\n    const first = getChatMessages(0, {include_swipes:true})[0];\n    if (getLastMessageId() !== 0 || !first || first.swipe_id !== 0 || !String(first.swipes?.[0]).includes('<开场选择/>')) throw new Error('旅程已经开始');\n    if (!first.swipes?.[target]?.includes('<initvar>')) throw new Error('目标开场缺失');\n    const doc = window.parent !== window ? window.parent.document : document;\n    const packet = {chatId, target, text:'我的身份：乘客'};\n    doc.dispatchEvent(new doc.defaultView.CustomEvent(type, {detail:packet}));\n    if (!packet.result) throw new Error('宿主尚未就绪');\n    st.textContent = '处理中';\n    st.textContent = await packet.result;\n  } catch (e) { st.textContent = '出错：' + (e?.message || e); }\n}\ndocument.getElementById('go').onclick = () => fire('e2e:opening-confirm', 2);\ndocument.getElementById('lonely').onclick = () => fire('e2e:nobody-listens', 2);\nst.textContent = '就绪 ' + (SillyTavern.getContext().getCurrentChatId() === hostId() ? '同一个聊天' : '对不上');\n</script></body></html>\n```",
+     "trimStrings": [],
+     "placement": [
+      2
+     ],
+     "disabled": false,
+     "markdownOnly": true,
+     "promptOnly": false,
+     "runOnEdit": true,
+     "substituteRegex": 0,
+     "minDepth": null,
+     "maxDepth": null
+    },
+    {
+     "id": "e2e-hide-initvar",
+     "scriptName": "隐藏初始变量",
+     "findRegex": "/<initvar>[\\s\\S]*?<\\/initvar>/g",
+     "replaceString": "",
+     "trimStrings": [],
+     "placement": [
+      2
+     ],
+     "disabled": false,
+     "markdownOnly": true,
+     "promptOnly": false,
+     "runOnEdit": true,
+     "substituteRegex": 0,
+     "minDepth": null,
+     "maxDepth": null
+    }
+   ],
+   "tavern_helper": {
+    "scripts": [
+     {
+      "type": "script",
+      "enabled": true,
+      "name": "开场宿主",
+      "id": "e2e-opening-host",
+      "content": "const hostDocument = window.parent.document;\nconst hostWindow = hostDocument.defaultView;\nconst chatNow = () => hostWindow.SillyTavern.getContext().getCurrentChatId();\nasync function confirmOpening({chatId, target, text}) {\n  if (chatId == null || chatNow() !== chatId) throw new Error('聊天已切换，请重新选择。');\n  const first = getChatMessages(0, {include_swipes:true})[0];\n  if (!first.swipes?.[target]?.includes('<initvar>')) throw new Error('目标开场缺失');\n  await setChatMessages([{message_id:0, swipe_id:target}], {refresh:'affected'});\n  if (getChatMessages(0, {include_swipes:true})[0]?.swipe_id !== target) throw new Error('开场跳转未保存');\n  const input = hostDocument.querySelector('#send_textarea');\n  const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), 'value')?.set;\n  setter.call(input, text);\n  input.dispatchEvent(new hostWindow.Event('input', {bubbles:true}));\n  hostWindow.__e2eOpening = '已检票上车 ' + target;\n  return '已检票上车。';\n}\nhostDocument.addEventListener('e2e:opening-confirm', (event) => {\n  const packet = event.detail;\n  if (!packet || packet.result) return;\n  packet.result = confirmOpening(packet);\n  packet.result.catch(() => {});\n});\nhostWindow.__e2eOpeningReady = true;\n",
+      "info": "",
+      "button": {
+       "enabled": true,
+       "buttons": []
+      },
+      "data": {},
+      "export_with": {
+       "data": true,
+       "button": true
+      }
+     }
+    ],
+    "variables": {}
+   }
+  }
+ }
+}

@@ -149,7 +149,17 @@
         return (snap.chat || []).filter(m => m.message_id >= a && m.message_id <= b)
             .filter(m => !o.role || o.role === 'all' || m.role === o.role)
             .filter(m => o.hide_state === 'hidden' ? m.is_hidden : o.hide_state === 'unhidden' ? !m.is_hidden : true)
-            .map(m => clone(m));
+            .map(m => (o.include_swipes ? swiped(m) : clone(m)));
+    }
+    // include_swipes 的返回形状和酒馆助手一样。快照里只有首楼和这个界面所在的楼带着全部版本（开场选择这类卡要用），
+    // 其余楼只有当前这一版
+    function swiped(m) {
+        const swipes = Array.isArray(m.swipes) && m.swipes.length ? m.swipes.slice() : [m.message];
+        const sid = Math.min(Number(m.swipe_id) || 0, swipes.length - 1);
+        return clone({
+            message_id: m.message_id, name: m.name, role: m.role, is_hidden: m.is_hidden, swipe_id: sid, swipes,
+            swipes_data: swipes.map((_, k) => (k === sid ? (m.data || {}) : {})), swipes_info: swipes.map(() => ({})),
+        });
     }
     const createChatMessages = (msgs, opt) => rpc('createChatMessages', msgs, opt || {});
     const setChatMessages = (msgs, opt) => rpc('setChatMessages', msgs, opt || {});
@@ -261,6 +271,11 @@
             name1: snap.userName, name2: snap.charName, chat: clone(snap.chat || []), chatId: snap.chatId,
             characterId: snap.characterId, eventSource: { on: eventOn, once: eventOnce, emit: eventEmit, removeListener: eventRemoveListener },
             eventTypes: tavern_events, event_types: tavern_events,
+            // 卡片常用来确认“还是不是刚才那个聊天”
+            getCurrentChatId: () => snap.chatId,
+            substituteParams: substitudeMacros, substituteParamsExtended: substitudeMacros,
+            mainApi: 'openai', groupId: null, groups: [],
+            isMobile: () => matchMedia('(max-width: 760px)').matches,
         }),
         chat: snap.chat,
     };
@@ -327,10 +342,35 @@
         querySelectorAll: (sel) => (isInputSel(sel) ? [fakeInput] : []),
         getElementById: (id) => (id === 'send_textarea' ? fakeInput : null),
         getElementsByTagName: (t) => (/^textarea$/i.test(t) ? [fakeInput] : []),
-        addEventListener: noop, removeEventListener: noop, dispatchEvent: () => true,
+        addEventListener: noop, removeEventListener: noop,
+        // 有的卡用“在父页面的 document 上发一个自定义事件”来叫自己的脚本干活，脚本把结果（多半是个 Promise）
+        // 放回 detail.result。这里隔着沙箱没法共用同一个对象：把事件转给宿主页面去发，detail.result 先放一个
+        // Promise 占着，等宿主那边的监听者给出结果再兑现；没人接就拒绝
+        dispatchEvent: (ev) => {
+            try {
+                if (ev && typeof ev.type === 'string' && 'detail' in ev) {
+                    const detail = ev.detail;
+                    const sent = rpc('parentEvent', ev.type, detail === undefined ? null : detail);
+                    if (detail && typeof detail === 'object' && !('result' in detail)) {
+                        detail.result = sent.then((r) => {
+                            if (!r || !r.handled) throw new Error('页面上没有脚本接这个事件（这张卡自带的脚本可能没启用，或者还没加载完）');
+                            if (r.error) throw new Error(r.error);
+                            return r.result;
+                        });
+                        detail.result.catch(noop);
+                    } else sent.catch(noop);
+                }
+            } catch (e) { /* 发不出去就当没人听 */ }
+            return true;
+        },
         createElement: (t) => document.createElement(t),
+        get defaultView() { return window.parent; },
         get body() { return null; }, get head() { return null; }, get documentElement() { return null; },
     };
+    // 卡片会从父窗口上拿的一些东西：酒馆的接口给这边的替身，构造器和几个无害的全局函数给这个窗口自己的
+    const OWN_GLOBALS = new Set(['CustomEvent', 'Event', 'MouseEvent', 'KeyboardEvent', 'PointerEvent', 'TouchEvent', 'CSS', 'JSON', 'Promise', 'console', 'navigator',
+        'innerWidth', 'innerHeight', 'devicePixelRatio', 'visualViewport']);
+    const OWN_FUNCTIONS = new Set(['getComputedStyle', 'matchMedia', 'requestAnimationFrame', 'cancelAnimationFrame', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval']);
     let sameOrigin = false;
     try { sameOrigin = !!realParent.document; } catch (e) { sameOrigin = false; }
     if (!sameOrigin && realParent !== window) {
@@ -343,6 +383,10 @@
                 if (p === 'indexedDB') { try { return window.indexedDB; } catch (e) { return undefined; } }
                 if (p === 'parent' || p === 'top') return fakeParent;
                 if (p === 'window' || p === 'self') return fakeParent;
+                if (p === 'SillyTavern') return SillyTavern;
+                if (p === 'TavernHelper') return api;
+                if (OWN_GLOBALS.has(p)) return window[p];
+                if (OWN_FUNCTIONS.has(p)) return window[p].bind(window);
                 try { return realParent[p]; } catch (e) { return undefined; }
             },
             set() { return true; },

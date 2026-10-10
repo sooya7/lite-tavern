@@ -54,6 +54,7 @@ tools/
   mock-llm.mjs          假模型服务（OpenAI / Claude / Gemini，可模拟 429、错误正文、空回复、慢速；流式没发完被断开时计数 ABORTED）
   fixtures/test-card.json  端到端用测试卡（MVU + 世界书 + 正则 + 前端卡 + EJS）
   fixtures/script-card.json, script-preset.json  端到端用：自带世界书、正则、酒馆助手脚本的卡和预设
+  fixtures/opening-card.json  端到端用：开场选择卡（界面在父页面上发事件，卡自带的脚本接住后切开场）
   check-imports.mjs     前端模块导入导出静态检查
   smoke-real.mjs        用真实酒馆数据组提示词做冒烟（参数：数据目录、卡、预设、聊天）
   st-compat-scan.mjs, st-ejs-scan.mjs  扫描酒馆数据里用到了哪些特性
@@ -102,6 +103,15 @@ docs/HANDOFF.md         本文档
 **显示一条消息**（`ui/chat.js` → `fillMessage`）：`session.displayText()`（仅显示正则 + EJS 渲染）→ `formatMessage()`（引号高亮、showdown、DOMPurify、`<style>` 作用域化）→ 代码块里的完整 HTML 文档挂成沙箱 iframe（`ui/frontend.js`）。
 
 **前端卡**：iframe 是 `sandbox` 无同源。读接口（`getAllVariables`、`getChatMessages`、`Mvu.getMvuData` 等）用宿主注入的快照同步返回；写接口（`createChatMessages`、`setChatMessages`、`triggerSlash`、`replaceVariables`、`generate` / `generateRaw`）走 postMessage RPC，由 `chatops.js` / `generate.js` 里的函数执行。斜杠命令只支持一个子集（见 `chatops.js` 的 `triggerSlash`）。前端卡 `eventEmit` 的事件会同时发给脚本，脚本 `eventEmit` 的自定义事件也会转给前端卡。
+
+**前端卡借父页面叫脚本干活（2026-10-10，h30，起因是「绿皮车37小时」的开场选择报 `getCurrentChatId is not a function`）**：有的卡把活分成两半——楼层里的界面（沙箱）负责选，卡自带的酒馆助手脚本（同源）负责做，两边靠“在 `window.parent.document` 上发一个带命名空间的自定义事件、脚本把一个 Promise 写回 `detail.result`”联系。酒馆里两边同源，共用同一个 `detail` 对象；这里隔着沙箱，做法是：
+- `frontend-runtime.js` 里假的父页面 `document.dispatchEvent` 把事件名和 `detail` 经 `rpc('parentEvent')` 交给宿主，同时**立刻**在 `detail.result` 上放一个 Promise 占位（卡会同步检查 `if (!packet.result)`）
+- `ui/frontend.js` 的 `parentEvent` 在真的 `document` 上发一次；有监听者写了 `detail.result` 就等它，把结果或报错传回去；没人写就回 `handled: false`，界面那边的 Promise 以“页面上没有脚本接这个事件”拒绝
+- 只放行带命名空间的事件名（`xxx:yyy`、`xxx.yyy`、`xxx-yyy`），`lt:` 开头的不放行：沙箱里的内容不能借这条路伪造点击、按键或轻酒馆自己的事件
+- 假的父页面还补了 `SillyTavern`、`TavernHelper`、`document.defaultView`、`CustomEvent` 等构造器；沙箱里的 `SillyTavern.getContext()` 补了 `getCurrentChatId`（= 聊天文件名，和页面上的一致）、`substituteParams` 等
+- 快照里首楼和界面所在的楼带全部 swipe 的原文（`swipes`），`getChatMessages(…, {include_swipes: true})` 返回酒馆助手的形状；其余楼只有当前版本（长聊天每楼都带的话快照太大）。`swipes_data` 只有当前版本那一格有变量
+- **改了 `frontend-runtime.js` 一定要改 `ui/frontend.js` 里的 `RT_V`**（运行时是长缓存的），这次从 h12 一路没改，补到 h30
+- 测试卡 `tools/fixtures/opening-card.json`，端到端“前端卡：界面在页面上发事件叫卡自带的脚本干活”。**没有拿用户那张真卡在 117 上点过**（会改他的聊天），只按它的代码写了同样流程的复现
 
 ### 聊天和角色卡的流量（2026-10-10）
 
@@ -242,6 +252,7 @@ docs/HANDOFF.md         本文档
 
 ## 5. 当前状态（已验证的部分）
 
+- 2026-10-10 前端卡借父页面叫脚本（h30）：单测 50/50，端到端连共用实例 45/45（新增 1 项）
 - 2026-10-10 服务器代生成（h22）：单测 45/45（新增 `test/gen-jobs.test.mjs` 7 项）；端到端 42/42（新增 6 项：页面在线时由页面收尾、断网后按 seq 续传不丢不重字、生成中关掉页面后服务器写完回复和随 AI 输出的变量并在重开后补发事件、页面在线 / 停止时服务器不再写、额外模型解析的变量由服务器算好、刷新页面后接回生成中的任务；“中途停止”还检查了上游确实被断开）。端到端里关页面的两项要等宽限期，各约 28 秒。**只在本地测过，没有部署到 117**；真机 iPhone 后台 / 锁屏没试过
 
 - `npm test`：38 项（含 `test/mvu-extra.test.mjs` 变量单独更新、`test/mvu-panel.test.mjs` 黑白名单正则 / 世界书筛选 / 请求组装 / 请求策略 / 自动清理与恢复 / 增量校正合并 / 角色卡覆盖）。原 21 项核心单元测试全过（宏、正则、世界书、EJS、MVU、变量、提示词组装、接口格式、PNG/JSONL 往返、前端卡识别、缩略图、设置面板结构与搜索清单；脚本库的规范化与起停判断、MVU 事件流程与不发事件的路径结果一致、状态栏占位符、酒馆助手数据格式来回转换、导入角色卡时世界书和脚本的去向）

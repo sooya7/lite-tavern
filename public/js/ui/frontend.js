@@ -5,7 +5,7 @@ import { messageText } from '../core/chat.js';
 import { setPath } from '../core/util.js';
 
 // 前端卡运行时的版本号：改了 frontend-runtime.js 就改这里，iframe 才会用新的（平时走长期缓存，不用每个 iframe 都请求一次）
-const RT_V = '20261010h12';
+const RT_V = '20261010h30';
 const frames = new Map(); // frameId → {iframe, messageId}
 let nextId = 1;
 let handlers = {};
@@ -47,6 +47,9 @@ export function buildSnapshot(messageId) {
             message: messageText(m),
             data: messageVars[i] ?? {},
             swipe_id: m.swipe_id ?? 0,
+            // 全部版本只给首楼和这个界面所在的楼（开场选择这类卡要看首楼有哪些开场）；每一楼都带的话长聊天的快照会非常大
+            ...((i === 0 || i === mid) && Array.isArray(m.swipes) && m.swipes.length > 1
+                ? { swipes: m.swipes.map((t, k) => (k === (m.swipe_id ?? 0) ? messageText(m) : String(t ?? ''))) } : {}),
             extra: m.extra ?? {},
         })),
         messageVars,
@@ -184,6 +187,21 @@ async function runRpc(frame, method, args) {
         case 'deleteChatMessages': return handlers.deleteChatMessages?.(...args);
         case 'triggerSlash': return handlers.triggerSlash?.(...args) ?? '';
         case 'setChatInput': setComposerInput(args[0]); return null;
+        case 'parentEvent': {
+            // 卡片界面在“父页面的 document”上发的自定义事件：在这边真的发一次，卡片自带的脚本（跑在同源的 iframe 里）能收到。
+            // 只放行带命名空间的事件名（hc1:opening-confirm 这种），不让沙箱里的内容伪造点击、按键，也不让它发轻酒馆自己的 lt: 事件
+            const [type, detail] = args;
+            if (typeof type !== 'string' || !/^[a-z][\w]*[:.\-][\w:.\-]+$/i.test(type) || /^lt[:.\-]/i.test(type)) throw new Error(`不支持在页面上发这个事件：${type}`);
+            const d = detail && typeof detail === 'object' ? detail : { value: detail };
+            document.dispatchEvent(new CustomEvent(type, { detail: d }));
+            if (!('result' in d)) return { handled: false };
+            try {
+                const result = await d.result;
+                return { handled: true, result: result === undefined ? null : JSON.parse(JSON.stringify(result)) };
+            } catch (e) {
+                return { handled: true, error: String(e?.message ?? e) };
+            }
+        }
         case 'generate': return handlers.scriptGenerate?.(args[0] ?? {}, { raw: false }) ?? '';
         case 'generateRaw': return handlers.scriptGenerate?.(args[0] ?? {}, { raw: true }) ?? '';
         case 'helper': {
