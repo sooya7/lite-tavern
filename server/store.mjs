@@ -259,6 +259,61 @@ export class Store {
         return { file, card, world };
     }
 
+    /**
+     * 用新版的卡文件原地更新一张已有的卡（2026-10-10 用户要求：新版直接覆盖，不留备份）。
+     * 卡的内容（设定、开场白、自带的正则和脚本）整张换成新版；新文件是 PNG 时头像也换，是 JSON 时头像保留；
+     * 卡自带的世界书直接覆盖这张卡关联的那本（没有关联过就按导入时的规则起名）。
+     * 聊天记录按卡的文件名存，文件名不变，所以原样保留。只留用户自己打的标记（收藏）。
+     * @returns {Promise<{file: string, card: object, oldName: string, world?: string, worldReplaced: boolean, avatarChanged: boolean}>}
+     */
+    async updateCard(file, bytes) {
+        const safe = sanitizeName(file);
+        const full = this.p('characters', safe);
+        let oldBuf, old;
+        try {
+            oldBuf = new Uint8Array(await fsp.readFile(full));
+            old = await this.readCard(safe);
+        } catch {
+            throw new HttpError(404, '找不到要更新的这张角色卡');
+        }
+        const u8 = new Uint8Array(bytes);
+        const png = isPng(u8);
+        let card;
+        try {
+            const raw = JSON.parse(png ? readCardJson(u8) : Buffer.from(bytes).toString('utf8').replace(/^\uFEFF/, ''));
+            if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('不是角色卡');
+            const d = raw.data && typeof raw.data === 'object' ? raw.data : raw;
+            if (typeof d.name !== 'string' || !d.name.trim() || !('first_mes' in d || 'description' in d || raw.spec)) throw new Error('不是角色卡');
+            card = normalizeCard(raw);
+        } catch {
+            throw new HttpError(400, '这个文件不是角色卡（读不出卡的内容），原来的卡没有动');
+        }
+        const image = png ? u8 : (isPng(oldBuf) ? oldBuf : defaultAvatar(card.data.name));
+        card.data.extensions = card.data.extensions ?? {};
+        if (old.data?.extensions?.fav) { card.data.extensions.fav = true; card.fav = true; }
+
+        const book = card.data.character_book;
+        const oldWorld = old.data?.extensions?.world || '';
+        let world, worldReplaced = false;
+        if (book?.entries?.length) {
+            world = oldWorld || card.data.extensions.world || book.name || `${card.data.name} 世界书`;
+            const worldFile = this.p('worlds', `${sanitizeName(world)}.json`);
+            worldReplaced = fs.existsSync(worldFile);
+            const w = characterBookToWorld(book);
+            delete w.originalData;
+            await this.writeAtomic(worldFile, JSON.stringify({ entries: w.entries, name: world }, null, 2));
+            card.data.extensions.world = sanitizeName(world);
+        } else if (oldWorld) {
+            card.data.extensions.world = oldWorld; // 新版没带世界书：原来关联的那本接着用
+        }
+        const out = /\.png$/i.test(safe)
+            ? Buffer.from(writeCardPng(image, toExportCard(card)))
+            : Buffer.from(JSON.stringify(toExportCard(card), null, 2), 'utf8');
+        await this.writeAtomic(full, out);
+        this.cardMeta.delete(safe);
+        return { file: safe, card, oldName: old.data?.name ?? '', world, worldReplaced, avatarChanged: png && /\.png$/i.test(safe) };
+    }
+
     async saveCard(file, card, check = {}) {
         const full = this.p('characters', sanitizeName(file));
         await this.guardWrite(full, check, '这张角色卡', { sub: 'characters', base: sanitizeName(file).replace(/\.(png|json)$/i, ''), keep: 3 });

@@ -958,6 +958,67 @@ def main():
             page.wait_for_function("() => document.querySelector('#e2e-float').textContent.includes('脚本测试卡')", timeout=8000)
         run('脚本：刷新页面后自动恢复运行', script_reload)
 
+        def update_card():
+            # 用新版卡文件更新「脚本测试卡」：名字、版本、开场白换成新版的，聊天记录还在，不多出一张卡
+            cards0 = js("fetch('/api/characters').then(r => r.json())")
+            old = next(c for c in cards0 if c['name'] == '脚本测试卡')
+            chats0 = old['chats']
+            assert chats0 >= 1, '更新前应该已经有聊天'
+            with open(SCRIPT_CARD, encoding='utf-8') as f:
+                v2 = json.load(f)
+            v2['data']['name'] = '脚本测试卡·新版'
+            v2['data']['character_version'] = '9.9'
+            v2['data']['first_mes'] = '这是新版的开场白'
+            v2_path = os.path.join(SHOTS, 'script-card-v2.json')
+            with open(v2_path, 'w', encoding='utf-8') as f:
+                json.dump(v2, f, ensure_ascii=False)
+            not_card = os.path.join(SHOTS, 'not-a-card.json')
+            with open(not_card, 'w', encoding='utf-8') as f:
+                json.dump({'prompts': [], 'temperature': 1}, f)
+            page.locator('#left button', has_text='首页').first.click()
+            page.wait_for_selector('#chat .home-wrap')
+            page.locator('#chat .home-tab', has_text='角色库').click()
+            card = page.locator('#chat .char-card', has=page.locator('.cc-name', has_text='脚本测试卡')).first
+
+            def pick(path):
+                card.locator('button[title="更多"]').click()
+                with page.expect_file_chooser() as fc:
+                    page.locator('.menu button', has_text='用新版卡文件更新').click()
+                fc.value.set_files(path)
+
+            # 选错文件：提示不是角色卡，卡不动
+            pick(not_card)
+            page.wait_for_selector('#toasts .toast >> text=不是角色卡', timeout=5000)
+            assert page.locator('.modal-foot').count() == 0, '不是角色卡时不该弹确认'
+            # 选对文件：确认框里写着新旧名字，点“覆盖”
+            pick(v2_path)
+            page.wait_for_selector('.modal-foot button >> text=覆盖', timeout=5000)
+            tip = page.locator('.modal').inner_text()
+            assert_in('脚本测试卡·新版', tip, '确认框')
+            assert_in('版本 9.9', tip, '确认框')
+            assert_in('聊天记录保留', tip, '确认框')
+            page.locator('.modal-foot button', has_text='覆盖').click()
+            page.wait_for_selector('#toasts .toast >> text=已更新为「脚本测试卡·新版」', timeout=10000)
+            page.wait_for_timeout(800)
+            cards1 = js("fetch('/api/characters').then(r => r.json())")
+            assert len(cards1) == len(cards0), f'更新不该多出卡：{len(cards0)} → {len(cards1)}'
+            new = next(c for c in cards1 if c['file'] == old['file'])
+            assert new['name'] == '脚本测试卡·新版' and new['version'] == '9.9', new
+            assert new['chats'] == chats0, f"聊天记录数变了：{chats0} → {new['chats']}"
+            got = js(f"fetch('/api/characters/' + encodeURIComponent({json.dumps(old['file'])})).then(r => r.json())")
+            assert (got.get('card') or got)['data']['first_mes'] == '这是新版的开场白'
+            # 这张卡正开着：界面跟着换成新版（顶栏名字），脚本照常在跑
+            page.wait_for_function("() => document.querySelector('#topbar')?.innerText.includes('脚本测试卡·新版')", timeout=10000)
+            # 改回原名，后面的用例按原名找这张卡
+            with open(SCRIPT_CARD, 'rb') as f:
+                raw = f.read()
+            r = js(f"fetch('/api/characters/' + encodeURIComponent({json.dumps(old['file'])}) + '/update', {{ method: 'POST', headers: {{ 'X-LT-Client': '2' }}, body: new Uint8Array({list(raw)}) }}).then(r => r.json())")
+            assert r['name'] == '脚本测试卡', r
+            page.reload(); enter_from_home()
+            page.wait_for_selector('#chat .mes')
+            page.wait_for_timeout(1200)
+        run('角色卡更新：用新版卡文件覆盖，聊天记录保留；选错文件不动', update_card)
+
         def method_select():
             return page.locator('#right .card', has=page.locator('.card-title', has_text='变量更新方式')).first.locator('select').first
 

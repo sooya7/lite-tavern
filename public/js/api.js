@@ -141,6 +141,8 @@ export const api = {
     createCharacter: (card) => request('POST', '/api/characters/create', card),
     deleteCharacter: (file, withChats) => { versions.delete(`characters/${file}`); return request('DELETE', `/api/characters/${enc(file)}?chats=${withChats ? 1 : 0}`); },
     importCharacter: (file) => request('POST', '/api/characters/import', file, { headers: { 'X-File-Name': enc(file.name) } }),
+    /** 用新版卡文件原地更新一张卡。手里记着的旧版本号作废，之后要重新读这张卡 */
+    updateCharacter: (file, f) => { versions.delete(`characters/${file}`); return request('POST', `/api/characters/${enc(file)}/update`, f, { headers: { 'X-File-Name': enc(f.name) } }); },
     setCharacterAvatar: async (file, blob) => {
         // 换头像会重写整张卡的文件，版本号跟着变；这不算“别处改的”，直接记新的
         const res = await request('PUT', `/api/characters/${enc(file)}/avatar`, blob, { raw: true });

@@ -1,11 +1,12 @@
 // 左栏：新聊天 / 角色库入口、最近角色、当前角色的聊天记录、底部用户设定。
 // 这里只放“去哪儿”：导入和新建角色在角色库页，其余设置都在右侧设置面板（每个功能只留一个入口）。
 import { h, $, clear, icon, iconBtn, toast, confirmDialog, promptDialog, popupMenu, pickFiles, formatTime, downloadText, brandMark } from './dom.js';
-import { state, saveSettings, refreshLists, activePersona, eventSource } from '../state.js';
+import { state, saveSettings, refreshLists, activePersona, eventSource, flushPending } from '../state.js';
 import { api } from '../api.js';
 import { selectCharacter, openChat, newChat, reloadCharacters, refresh } from '../controller.js';
-import { importFiles } from './importers.js';
-import { newCard } from '../core/card.js';
+import { importFiles, classifyJson } from './importers.js';
+import { newCard, normalizeCard } from '../core/card.js';
+import { isPng, readCardJson } from '../core/png.js';
 import { cardGreetings } from '../core/card.js';
 import { charAvatar, personaAvatar } from './avatars.js';
 import { setHomeTab } from './library.js';
@@ -150,11 +151,62 @@ export function charMenu(anchor, c) {
     popupMenu(anchor, [
         { label: '编辑角色卡', icon: 'edit', onClick: async () => { if (state.char?.file !== c.file) await selectCharacter(c.file); openPanel('char'); } },
         { label: c.fav ? '取消收藏' : '收藏', icon: 'star', onClick: () => toggleFav(c) },
+        { label: '用新版卡文件更新…', icon: 'upload', onClick: () => updateChar(c) },
         { label: '导出 PNG 卡', icon: 'download', onClick: () => window.open(api.exportCharacterUrl(c.file, 'png'), '_blank') },
         { label: '导出 JSON', icon: 'download', onClick: () => window.open(api.exportCharacterUrl(c.file, 'json'), '_blank') },
         '-',
         { label: '删除角色', icon: 'trash', danger: true, onClick: () => deleteChar(c) },
     ]);
+}
+
+/** 读一下选中的文件是不是角色卡，取出名字、版本、有没有自带世界书（给确认框用） */
+async function peekCardFile(f) {
+    const bytes = new Uint8Array(await f.arrayBuffer());
+    const png = isPng(bytes);
+    const raw = JSON.parse(png ? readCardJson(bytes) : new TextDecoder().decode(bytes).replace(/^\uFEFF/, ''));
+    if (classifyJson(raw) !== 'card') throw new Error('不是角色卡');
+    const d = normalizeCard(raw).data;
+    if (!d.name) throw new Error('卡里没有名字');
+    return { png, name: d.name, version: d.character_version ?? '', hasBook: !!d.character_book?.entries?.length };
+}
+
+/**
+ * 用新版的卡文件更新这张卡：卡的内容和自带世界书直接覆盖，聊天记录保留，不留备份（2026-10-10 用户定的）。
+ * 覆盖了找不回来，所以先读出新文件里的卡名给用户确认一眼，免得选错文件。
+ */
+async function updateChar(c) {
+    const current = state.char?.file === c.file;
+    if (current && state.generating) { toast('正在生成，等这条回复结束再更新', 'warning'); return; }
+    const [f] = await pickFiles({ accept: '.png,.json' });
+    if (!f) return;
+    let info;
+    try {
+        info = await peekCardFile(f);
+    } catch (e) {
+        toast(`${f.name} 不是角色卡，没有更新`, 'error');
+        return;
+    }
+    const ver = (v) => (v ? `（版本 ${v}）` : '');
+    const ok = await confirmDialog(
+        `用「${info.name}」${ver(info.version)}覆盖现在的「${c.name}」${ver(c.version)}？\n\n`
+        + `设定、开场白、自带的正则和脚本${info.png ? '、头像' : ''}都换成新版的${info.hasBook ? '，卡自带的世界书也直接覆盖' : ''}。聊天记录保留。\n`
+        + '不留备份，覆盖后找不回旧版。',
+        { danger: true, okLabel: '覆盖' });
+    if (!ok) return;
+    try {
+        await flushPending(); // 这张卡要是还有没存的编辑，先落盘，免得更新之后又被旧内容盖回去
+        const r = await api.updateCharacter(c.file, f);
+        const extra = [
+            r.world ? `世界书「${r.world}」${r.worldReplaced ? '已覆盖' : '已添加并绑定'}` : '',
+            r.scripts ? `${r.scripts} 个脚本` : '',
+            r.regex ? `${r.regex} 条正则` : '',
+        ].filter(Boolean);
+        toast(`已更新为「${r.name}」${ver(r.version)}${extra.length ? `：${extra.join('，')}` : ''}`, 'success', 5000);
+        await reloadCharacters();
+        if (current) await selectCharacter(c.file, { stay: state.view !== 'chat' });
+    } catch (e) {
+        toast(`更新失败：${e.message}`, 'error');
+    }
 }
 
 async function toggleFav(c) {

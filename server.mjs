@@ -149,6 +149,17 @@ router.post('/api/characters/import', async (req) => {
     const scripts = flattenScriptTrees(scriptTreesOf(card.data.extensions));
     return { file, name: card.data.name, world, scripts: scripts.length, scriptsOn: scripts.filter(x => x.on).length, regex: card.data.extensions?.regex_scripts?.length ?? 0 };
 });
+// 用新版卡文件原地更新一张卡（聊天记录保留，卡的内容和自带世界书直接覆盖，不留备份）
+router.post('/api/characters/:file/update', async (req, res, { file }) => {
+    const bytes = await readBody(req);
+    const r = await store.updateCard(file, bytes);
+    const scripts = flattenScriptTrees(scriptTreesOf(r.card.data.extensions));
+    return {
+        file: r.file, name: r.card.data.name, oldName: r.oldName, version: r.card.data.character_version ?? '',
+        world: r.world, worldReplaced: r.worldReplaced, avatarChanged: r.avatarChanged,
+        scripts: scripts.length, scriptsOn: scripts.filter(x => x.on).length, regex: r.card.data.extensions?.regex_scripts?.length ?? 0,
+    };
+});
 router.post('/api/characters/create', async (req) => {
     const card = await readJson(req);
     const file = await store.uniqueCardFile(card?.data?.name || '新角色');
