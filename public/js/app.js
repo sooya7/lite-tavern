@@ -1,8 +1,10 @@
 // 启动：读设置 → 绑界面 → 恢复上次的聊天；前端卡的写接口、斜杠命令子集也在这里接上
-import { state, withDefaults, refreshLists, ensurePreset, eventSource, event_types, saveSettings, saveChat, activePersona } from './state.js';
+import { state, withDefaults, refreshLists, ensurePreset, eventSource, event_types, saveSettings } from './state.js';
 import { api } from './api.js';
-import { bindUI, selectCharacter, openChat, newChat, getSession, refresh, addUserMessage, addNarratorMessage, toggleHidden } from './controller.js';
-import { bindGenerateUI, generate, generateQuiet, stopGeneration } from './generate.js';
+import { bindUI, selectCharacter, openChat, newChat, getSession, refresh } from './controller.js';
+import { bindGenerateUI, generateQuiet, scriptGenerate, stopGeneration } from './generate.js';
+import { createChatMessages, setChatMessages, deleteChatMessages, triggerSlash, onVariablesChanged } from './chatops.js';
+import { initScripts, syncScripts, renderScriptButtons } from './ui/scripts.js';
 import { renderChat, appendMessage, renderMessage, updateStreaming, removeMessage, setGenerating, setStatus, setComposerText, renderComposer, renderTopbar, initScrollTracking } from './ui/chat.js';
 import { renderSidebar } from './ui/sidebar.js';
 import { renderPanels, rerenderIfActive, focusPanelSearch } from './ui/panels/index.js';
@@ -10,8 +12,7 @@ import { applyAppearance } from './ui/panels/settings.js';
 import { setFrontendHandlers, refreshSnapshots, broadcastEvent } from './ui/frontend.js';
 import { importFiles } from './ui/importers.js';
 import { h, toast, modal } from './ui/dom.js';
-import { createUserMessage, messageText } from './core/chat.js';
-import { getPath, setPath, humanizedDate } from './core/util.js';
+import { createUserMessage } from './core/chat.js';
 
 const app = document.getElementById('app');
 const scrim = document.getElementById('scrim');
@@ -90,250 +91,6 @@ function initDrop() {
     });
 }
 
-// ---------- 前端卡 / 斜杠命令 ----------
-function roleToFields(role) {
-    return { is_user: role === 'user', is_system: role === 'system' };
-}
-
-async function createChatMessages(msgs, opt = {}) {
-    if (!state.chat) throw new Error('没有打开的聊天');
-    const session = getSession();
-    const chat = state.chat.messages;
-    let at = opt.insert_at === undefined || opt.insert_at === 'end' ? chat.length : Number(opt.insert_at);
-    if (at < 0) at = chat.length + at + 1;
-    const created = (Array.isArray(msgs) ? msgs : [msgs]).map(m => {
-        const role = m.role ?? 'assistant';
-        const name = m.name ?? (role === 'user' ? session.names.user : role === 'system' ? 'System' : session.names.char);
-        const msg = { name, ...roleToFields(role), send_date: humanizedDate(), mes: String(m.message ?? ''), extra: {} };
-        if (role === 'assistant') { msg.swipes = [msg.mes]; msg.swipe_id = 0; msg.swipe_info = [{ send_date: msg.send_date, extra: {} }]; }
-        if (m.is_hidden) msg.is_system = true;
-        if (m.data) msg.variables = [m.data];
-        return msg;
-    });
-    chat.splice(at, 0, ...created);
-    session.vars.invalidate();
-    saveChat();
-    if (opt.refresh !== 'none') renderChat();
-    await eventSource.emit(event_types.MESSAGE_UPDATED, at);
-    refreshSnapshots();
-    return null;
-}
-
-async function setChatMessages(list, opt = {}) {
-    const chat = state.chat?.messages;
-    if (!chat) throw new Error('没有打开的聊天');
-    const touched = [];
-    for (const m of (Array.isArray(list) ? list : [list])) {
-        const id = Number(m.message_id);
-        const msg = chat[id];
-        if (!msg) continue;
-        if (m.message !== undefined) {
-            msg.mes = String(m.message);
-            if (Array.isArray(msg.swipes)) msg.swipes[msg.swipe_id ?? 0] = msg.mes;
-        }
-        if (m.name !== undefined) msg.name = m.name;
-        if (m.role !== undefined) Object.assign(msg, roleToFields(m.role));
-        if (m.is_hidden !== undefined) msg.is_system = !!m.is_hidden;
-        if (m.data !== undefined) {
-            if (!Array.isArray(msg.variables)) msg.variables = [];
-            msg.variables[msg.swipe_id ?? 0] = m.data;
-        }
-        touched.push(id);
-    }
-    getSession()?.vars.invalidate();
-    saveChat();
-    if (opt.refresh === 'all') renderChat();
-    else if (opt.refresh !== 'none') for (const id of touched) renderMessage(id);
-    for (const id of touched) await eventSource.emit(event_types.MESSAGE_UPDATED, id);
-    refreshSnapshots();
-    return null;
-}
-
-async function deleteChatMessages(ids) {
-    const chat = state.chat?.messages;
-    if (!chat) throw new Error('没有打开的聊天');
-    const list = [...new Set((Array.isArray(ids) ? ids : [ids]).map(Number))].filter(i => i >= 0 && i < chat.length).sort((a, b) => b - a);
-    for (const i of list) chat.splice(i, 1);
-    getSession()?.vars.invalidate();
-    saveChat();
-    renderChat();
-    await eventSource.emit(event_types.MESSAGE_DELETED, list[list.length - 1] ?? 0);
-    refreshSnapshots();
-    return null;
-}
-
-/** 按未转义的 | 拆管道 */
-function splitPipes(cmd) {
-    const out = [];
-    let cur = '';
-    let quote = '';
-    for (let i = 0; i < cmd.length; i++) {
-        const c = cmd[i];
-        if (c === String.fromCharCode(92) && cmd[i + 1] === '|') { cur += '|'; i++; continue; }
-        if (quote) { if (c === quote) quote = ''; cur += c; continue; }
-        if (c === '|' && /\s*\/\w/.test(cmd.slice(i + 1))) { out.push(cur); cur = ''; continue; }
-        cur += c;
-    }
-    out.push(cur);
-    return out.map(s => s.trim()).filter(Boolean);
-}
-
-/** 解析 /cmd key=value key="v v" 剩余文本 */
-function parseCommand(seg) {
-    const m = seg.match(/^\/(\S+)\s*([\s\S]*)$/);
-    if (!m) return null;
-    const name = m[1].toLowerCase();
-    let rest = m[2];
-    const args = {};
-    for (;;) {
-        const a = rest.match(/^([A-Za-z_][\w-]*)=("([^"]*)"|'([^']*)'|(\S*))\s*/);
-        if (!a) break;
-        args[a[1]] = a[3] ?? a[4] ?? a[5] ?? '';
-        rest = rest.slice(a[0].length);
-    }
-    return { name, args, text: rest.trim() };
-}
-
-function rangeOf(text) {
-    const chat = state.chat.messages;
-    const m = String(text).trim().match(/^(-?\d+)(?:\s*-\s*(-?\d+))?$/);
-    if (!m) return [];
-    let a = Number(m[1]), b = m[2] !== undefined ? Number(m[2]) : a;
-    if (a < 0) a += chat.length;
-    if (b < 0) b += chat.length;
-    const out = [];
-    for (let i = Math.max(0, Math.min(a, b)); i <= Math.min(chat.length - 1, Math.max(a, b)); i++) out.push(i);
-    return out;
-}
-
-async function triggerSlash(command) {
-    if (!state.chat) throw new Error('没有打开的聊天');
-    let pipe = '';
-    for (const seg of splitPipes(String(command))) {
-        const c = parseCommand(seg);
-        if (!c) continue;
-        const session = getSession();
-        const text = (c.text || pipe).replace(/\{\{pipe\}\}/g, pipe);
-        switch (c.name) {
-            case 'send': await addUserMessage(text); pipe = ''; break;
-            case 'sendas': {
-                const msg = { name: c.args.name || session.names.char, is_user: false, is_system: false, send_date: humanizedDate(), mes: session.substitute(text), extra: {} };
-                msg.swipes = [msg.mes]; msg.swipe_id = 0; msg.swipe_info = [{ send_date: msg.send_date, extra: {} }];
-                state.chat.messages.push(msg);
-                appendMessage(state.chat.messages.length - 1);
-                saveChat();
-                pipe = '';
-                break;
-            }
-            case 'sys': case 'narrate': await addNarratorMessage(session.substitute(text)); pipe = ''; break;
-            case 'comment': {
-                state.chat.messages.push({ name: '注释', is_user: false, is_system: true, send_date: humanizedDate(), mes: text, extra: { type: 'comment' } });
-                appendMessage(state.chat.messages.length - 1);
-                saveChat();
-                pipe = '';
-                break;
-            }
-            case 'trigger': {
-                const p = generate('normal');
-                if (c.args.await === 'true') await p;
-                pipe = '';
-                break;
-            }
-            case 'continue': await generate('continue'); break;
-            case 'regenerate': case 'regen': await generate('regenerate'); break;
-            case 'swipe': await generate('swipe'); break;
-            case 'gen': case 'genraw': pipe = (await generateQuiet({ user_input: text })) ?? ''; break;
-            case 'echo': toast(text, c.args.severity ?? 'info'); pipe = text; break;
-            case 'setvar': case 'setglobalvar': {
-                const key = c.args.key ?? c.args.name;
-                const scope = c.name === 'setglobalvar' ? session.vars.global() : session.vars.local();
-                setPath(scope, key, text);
-                if (c.name === 'setglobalvar') saveSettings(); else saveChat();
-                session.vars.invalidate();
-                pipe = text;
-                break;
-            }
-            case 'getvar': case 'getglobalvar': {
-                const key = c.args.key ?? c.args.name ?? text;
-                const v = getPath(c.name === 'getglobalvar' ? session.vars.global() : session.vars.local(), key);
-                pipe = v === undefined ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v);
-                break;
-            }
-            case 'addvar': case 'incvar': case 'decvar': {
-                const key = c.args.key ?? c.args.name ?? text;
-                const scope = session.vars.local();
-                const cur = Number(getPath(scope, key) ?? 0);
-                const delta = c.name === 'incvar' ? 1 : c.name === 'decvar' ? -1 : Number(text) || 0;
-                setPath(scope, key, cur + delta);
-                saveChat();
-                session.vars.invalidate();
-                pipe = String(cur + delta);
-                break;
-            }
-            case 'hide': case 'unhide': {
-                for (const i of rangeOf(text)) {
-                    const m = state.chat.messages[i];
-                    if (!!m.is_system !== (c.name === 'hide')) toggleHidden(i);
-                }
-                pipe = '';
-                break;
-            }
-            case 'cut': case 'del': {
-                const ids = c.name === 'del' ? rangeOf(`-${Number(text) || 1}--1`) : rangeOf(text);
-                await deleteChatMessages(ids);
-                pipe = '';
-                break;
-            }
-            case 'messages': {
-                pipe = rangeOf(text || `0-${state.chat.messages.length - 1}`).map(i => `${state.chat.messages[i].name}: ${messageText(state.chat.messages[i])}`).join('\n\n');
-                break;
-            }
-            case 'newchat': await newChat(); break;
-            default:
-                toast(`前端调用了暂不支持的命令 /${c.name}`, 'warning');
-                console.warn('[斜杠命令] 不支持', seg);
-        }
-    }
-    refreshSnapshots();
-    return pipe;
-}
-
-async function onVariablesChanged(type) {
-    if (type === 'global') saveSettings(); else saveChat();
-    await eventSource.emit(event_types.VARIABLES_UPDATED, type);
-    refreshSnapshots();
-    rerenderIfActive('vars');
-}
-
-// ---------- 给 EJS 模板 / 插件用的 SillyTavern.getContext() 精简版 ----------
-function installContextShim() {
-    const ctx = () => {
-        const s = getSession();
-        return {
-            chat: state.chat?.messages ?? [],
-            chatId: state.chat?.name ?? '',
-            chatMetadata: state.chat?.header?.chat_metadata ?? {},
-            characterId: state.char?.id,
-            characters: state.char ? [{ ...state.char.card.data, data: state.char.card.data, avatar: state.char.file }] : [],
-            name1: s?.names.user ?? activePersona().name,
-            name2: s?.names.char ?? '',
-            eventSource,
-            eventTypes: event_types,
-            event_types,
-            substituteParams: (t) => s?.substitute(t) ?? t,
-            saveChat: () => saveChat({ now: true }),
-            generateQuietPrompt: (p) => generateQuiet({ user_input: typeof p === 'object' ? p.quietPrompt : p }),
-            executeSlashCommands: (cmd) => triggerSlash(cmd).then(pipe => ({ pipe })),
-            extensionSettings: state.settings.extensions,
-            variables: {
-                local: { get: (k) => getPath(s?.vars.local() ?? {}, k), set: (k, v) => { setPath(s.vars.local(), k, v); saveChat(); } },
-                global: { get: (k) => getPath(s?.vars.global() ?? {}, k), set: (k, v) => { setPath(s.vars.global(), k, v); saveSettings(); } },
-            },
-        };
-    };
-    window.SillyTavern = { getContext: ctx };
-}
-
 // ---------- 登录 ----------
 function loginDialog() {
     return new Promise((resolve) => {
@@ -373,14 +130,23 @@ async function boot() {
     state.settings = withDefaults(raw);
     applyAppearance();
     window.addEventListener('lt:need-login', () => loginDialog().then(() => location.reload()));
+    // 服务端升级了、这个页面还是旧的：再保存会被服务端挡住。只提示一次，让用户自己挑时候刷新
+    window.addEventListener('lt:stale-client', () => {
+        modal({
+            title: '页面需要刷新',
+            body: h('div', { style: { whiteSpace: 'pre-wrap' } }, '轻酒馆刚更新过，这个页面还是旧版本，刚才的修改没有保存。\n刷新之后再继续；输入框里没发出去的字先复制一下。'),
+            actions: [{ label: '先不刷新', value: false }, { label: '刷新页面', primary: true, onClick: () => { location.reload(); return false; } }],
+        });
+    }, { once: true });
 
     bindUI({ sidebar: renderSidebar, chat: renderChat, topbar: renderTopbar, panels: renderPanels, appendMessage, renderMessage, renderChat });
     bindGenerateUI({
         openPanel: (tab) => window.dispatchEvent(new CustomEvent('lt:open-panel', { detail: tab })),
         renderChat, appendMessage, renderMessage, updateStreaming, removeMessage, setGenerating, setStatus, setComposerText,
     });
-    setFrontendHandlers({ createChatMessages, setChatMessages, deleteChatMessages, triggerSlash, generateQuiet, onVariablesChanged });
-    installContextShim();
+    setFrontendHandlers({ createChatMessages, setChatMessages, deleteChatMessages, triggerSlash, generateQuiet, scriptGenerate, onVariablesChanged });
+    // 酒馆助手脚本：装页面级接口（window.TavernHelper / SillyTavern / Mvu），之后跟着角色、预设的切换起停脚本
+    initScripts({ bindGenerate: bindGenerateUI });
 
     initDrawers();
     initDrop();
@@ -443,6 +209,8 @@ async function boot() {
     document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') import('./state.js').then(m => m.flushPending()); });
 
     await eventSource.emit(event_types.APP_READY);
+    renderScriptButtons();
+    await syncScripts();
 }
 
 boot().catch((e) => {

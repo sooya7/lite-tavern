@@ -6,7 +6,7 @@ After=network.target
 User=ubuntu
 Group=ubuntu
 WorkingDirectory=/opt/lite-tavern/app
-ExecStart=/usr/bin/node /opt/lite-tavern/app/server.mjs --port 8730 --host 127.0.0.1 --data /opt/lite-tavern/data
+ExecStart=/usr/bin/node /opt/lite-tavern/app/server.mjs --port 8730 --host 127.0.0.1 --data /opt/lite-tavern/data --st-data /opt/luker/data/admin
 Restart=on-failure
 RestartSec=3
 MemoryMax=320M
@@ -15,6 +15,8 @@ PrivateTmp=yes
 ProtectHome=yes
 ProtectSystem=strict
 ReadWritePaths=/opt/lite-tavern/data
+ReadWritePaths=/opt/luker/data/admin/characters /opt/luker/data/admin/chats /opt/luker/data/admin/worlds
+ReadWritePaths="/opt/luker/data/admin/OpenAI Settings"
 
 [Install]
 WantedBy=multi-user.target

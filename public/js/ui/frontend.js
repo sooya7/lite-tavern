@@ -1,6 +1,6 @@
 // 前端卡宿主：创建沙箱 iframe、注入运行时与数据快照、处理 iframe 发来的请求。
 import { h, toast } from './dom.js';
-import { state } from '../state.js';
+import { state, eventSource } from '../state.js';
 import { messageText } from '../core/chat.js';
 import { setPath } from '../core/util.js';
 
@@ -13,8 +13,10 @@ export function setFrontendHandlers(h2) {
     handlers = h2;
 }
 
+// 和酒馆助手的口径一致：旁白 / 注释算 system；被隐藏的楼层角色不变，隐藏与否看 is_hidden
 function roleOf(m) {
-    return m.is_user ? 'user' : (m.extra?.type === 'narrator' || m.is_system ? 'system' : 'assistant');
+    if (m.is_user) return 'user';
+    return m.extra?.type === 'narrator' || m.extra?.type === 'comment' ? 'system' : 'assistant';
 }
 
 export function buildSnapshot(messageId) {
@@ -144,7 +146,8 @@ async function runRpc(frame, method, args) {
         case 'setChatMessages': return handlers.setChatMessages?.(...args);
         case 'deleteChatMessages': return handlers.deleteChatMessages?.(...args);
         case 'triggerSlash': return handlers.triggerSlash?.(...args) ?? '';
-        case 'generate': return handlers.generateQuiet?.(...args) ?? '';
+        case 'generate': return handlers.scriptGenerate?.(args[0] ?? {}, { raw: false }) ?? '';
+        case 'generateRaw': return handlers.scriptGenerate?.(args[0] ?? {}, { raw: true }) ?? '';
         default: throw new Error(`前端卡调用了暂不支持的接口：${method}`);
     }
 }
@@ -164,7 +167,9 @@ window.addEventListener('message', async (e) => {
         return;
     }
     if (d.type === 'emit') {
+        // 其他前端界面和脚本都要能收到
         broadcastEvent(d.name, ...(d.args ?? []));
+        eventSource.emit(String(d.name), ...(d.args ?? []));
         return;
     }
     if (d.type === 'rpc') {

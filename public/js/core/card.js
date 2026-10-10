@@ -1,6 +1,7 @@
 // 角色卡：V1/V2/V3 规范化、字段访问、导出结构。保留未知字段，导出时能原样带回去。
 import { clone, isPlainObject } from './util.js';
 import { normalizeRegexScript } from './regex.js';
+import { scriptsOf } from './scripts.js';
 
 const V2_FIELDS = ['name', 'description', 'personality', 'scenario', 'first_mes', 'mes_example', 'creator_notes', 'system_prompt',
     'post_history_instructions', 'alternate_greetings', 'character_book', 'tags', 'creator', 'character_version', 'extensions'];
@@ -80,13 +81,8 @@ export const cardRegexScripts = (card) => card?.data?.extensions?.regex_scripts 
 export const cardDepthPrompt = (card) => card?.data?.extensions?.depth_prompt ?? null;
 export const cardLinkedWorld = (card) => card?.data?.extensions?.world ?? '';
 
-export function cardTavernHelperScripts(card) {
-    const th = card?.data?.extensions?.tavern_helper;
-    if (!th) return [];
-    if (Array.isArray(th.scripts)) return th.scripts;
-    if (Array.isArray(th)) return th;
-    return [];
-}
+/** 卡里夹带的酒馆助手脚本（文件夹已展开，规范化后的副本） */
+export const cardTavernHelperScripts = (card) => scriptsOf(card?.data?.extensions);
 
 /** 所有开场白（first_mes + alternate_greetings） */
 export function cardGreetings(card) {

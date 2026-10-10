@@ -1,11 +1,11 @@
 // 应用动作：选角色、开/建聊天、构建会话、消息增删改。UI 模块都通过这里改状态。
 import { api } from './api.js';
-import { state, eventSource, event_types, saveChat, saveSettings, ensurePreset, loadWorld, activePersona, refreshLists, flushPending } from './state.js';
+import { state, eventSource, event_types, saveChat, writeChat, onChatConflict, onFileConflict, saveSettings, ensurePreset, loadWorld, activePersona, refreshLists, flushPending, mvuEmitter } from './state.js';
 import { ChatSession } from './core/session.js';
 import { parseChatJsonl, newChatHeader, createGreetingMessage, createUserMessage, newChatName, messageText, syncSwipe } from './core/chat.js';
 import { cardGreetings } from './core/card.js';
 import { clone } from './core/util.js';
-import { toast } from './ui/dom.js';
+import { toast, modal, h } from './ui/dom.js';
 
 let ui = {};
 /** UI 层注册的刷新函数：renderSidebar / renderChat / renderTopbar / renderPanels / renderMessage */
@@ -80,13 +80,61 @@ export async function selectCharacter(file, { openLatest = true } = {}) {
     refresh();
 }
 
+let conflictOpen = false;
+/**
+ * 保存时发现磁盘上的聊天已经不是这边打开时的那一份（酒馆那边聊了几句，或者另一个窗口改过）。
+ * 不自作主张：让用户选是载入最新的（这边没存进去的修改作废），还是用这边的盖掉那边的（盖之前服务端会留备份）。
+ * 直接关掉弹窗 = 先不管，下次有改动要保存时会再问。
+ */
+onChatConflict(async (chat, charId) => {
+    if (conflictOpen) return;
+    conflictOpen = true;
+    const choice = await modal({
+        title: '这个聊天在别处被改过了',
+        body: h('div', { style: { whiteSpace: 'pre-wrap' } }, `「${chat.name}」在这边打开之后，又被别处改过${state.server?.shared ? '（比如在酒馆那边继续聊了）' : '（比如另一个窗口）'}，所以这边刚才的修改还没有保存。\n\n载入最新的：换成磁盘上现在的内容，这边没保存的修改作废。\n用这边的覆盖：把这边的内容写进去，别处的修改会被盖掉（覆盖前会自动留一份备份）。`),
+        actions: [{ label: '用这边的覆盖', value: 'overwrite', danger: true }, { label: '载入最新的', value: 'reload', primary: true }],
+    }).done;
+    conflictOpen = false;
+    if (choice === 'overwrite') {
+        await writeChat(charId, chat, { force: true });
+        if (!chat.conflict) toast('已用这边的内容覆盖', 'success');
+    } else if (choice === 'reload') {
+        if (state.chat === chat && state.char?.id === charId) {
+            if (state.generating) { toast('正在生成，先停止再载入', 'warning'); chat.conflict = false; return; }
+            await openChat(chat.name);
+            toast('已载入最新的内容', 'success');
+        }
+    } else {
+        chat.conflict = false;
+    }
+});
+
+const fileConflictsOpen = new Set();
+/** 角色卡 / 预设 / 世界书同理：别处改过就问，不替用户决定谁的算数 */
+onFileConflict(async ({ key, label, reload, overwrite }) => {
+    if (fileConflictsOpen.has(key)) return;
+    fileConflictsOpen.add(key);
+    const choice = await modal({
+        title: `${label}在别处被改过了`,
+        body: h('div', { style: { whiteSpace: 'pre-wrap' } }, `这边打开之后，它又被别处改过${state.server?.shared ? '（比如在酒馆那边保存过）' : '（比如另一个窗口）'}，所以这边刚才的修改还没有保存。\n\n载入最新的：换成磁盘上现在的内容，这边没保存的修改作废。\n用这边的覆盖：把这边的内容写进去，别处的修改会被盖掉（覆盖前会自动留一份备份）。`),
+        actions: [{ label: '用这边的覆盖', value: 'overwrite', danger: true }, { label: '载入最新的', value: 'reload', primary: true }],
+    }).done;
+    fileConflictsOpen.delete(key);
+    try {
+        if (choice === 'overwrite') { await overwrite(); toast('已用这边的内容覆盖', 'success'); }
+        else if (choice === 'reload') { await reload(); refresh(); toast('已载入最新的内容', 'success'); }
+    } catch (e) {
+        toast(`没成功：${e.message}`, 'error');
+    }
+});
+
 export async function openChat(name) {
     if (!state.char) return;
     if (state.generating) { toast('正在生成，先停止再切换', 'warning'); return; }
     await flushPending();
-    const text = await api.getChat(state.char.id, name);
+    const { text, version } = await api.getChat(state.char.id, name);
     const { header, messages } = parseChatJsonl(text);
-    state.chat = { name, header, messages };
+    state.chat = { name, header, messages, version };
     state.session = null;
     state.view = 'chat';
     state.settings.lastChat = { file: state.char.file, chat: name };
@@ -121,11 +169,12 @@ export async function newChat({ greetingIndex = 0 } = {}) {
         m.mes = m.swipes[m.swipe_id ?? 0];
     }
     s.ensureMvuInit();
-    await api.saveChat(state.char.id, name, (await import('./core/chat.js')).serializeChat(header, messages));
+    await writeChat(state.char.id, state.chat);
     state.chatList = await api.listChats(state.char.id);
     state.view = 'chat';
     state.settings.lastChat = { file: state.char.file, chat: name };
     saveSettings();
+    await eventSource.emit(event_types.CHAT_CREATED);
     await eventSource.emit(event_types.CHAT_CHANGED, name);
     refresh(['chat', 'topbar', 'sidebar', 'panels']);
 }
@@ -172,7 +221,7 @@ export async function editMessage(index, text) {
     const s = getSession();
     m.mes = s.processEdited(text, m.is_user);
     if (Array.isArray(m.swipes)) syncSwipe(m);
-    if (!m.is_user && s.mvuEnabled()) s.applyMvu(index);
+    if (!m.is_user && s.mvuEnabled()) await s.applyMvuAsync(index, mvuEmitter());
     s.vars.invalidate();
     await eventSource.emit(event_types.MESSAGE_EDITED, index);
     ui.renderMessage?.(index);
@@ -207,7 +256,7 @@ export async function setPreset(name) {
     await ensurePreset();
     state.session = null;
     saveSettings();
-    await eventSource.emit(event_types.PRESET_CHANGED, name);
+    await eventSource.emit(event_types.PRESET_CHANGED, { apiId: 'openai', name });
     refresh(['panels', 'topbar']);
 }
 

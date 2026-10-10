@@ -3,10 +3,21 @@ import { api } from '../api.js';
 import { state, saveSettings, refreshLists, loadWorld } from '../state.js';
 import { normalizeRegexScript } from '../core/regex.js';
 import { parseChatJsonl } from '../core/chat.js';
+import { scriptsOf } from '../core/scripts.js';
 import { toast, confirmDialog, promptDialog } from './dom.js';
 import { selectCharacter, reloadCharacters, setPreset, openChat, refresh } from '../controller.js';
 
 const BOM_RE = new RegExp('^' + String.fromCharCode(0xfeff));
+
+/** 导入角色卡后的提示：卡里自带的世界书、脚本、正则都已经跟着加进来了 */
+export function cardImportedText(r) {
+    const extra = [
+        r.world ? `世界书「${r.world}」已添加并绑定` : '',
+        r.scripts ? (r.scriptsOn === r.scripts ? `${r.scripts} 个脚本已启用` : `${r.scripts} 个脚本（${r.scriptsOn} 个启用，其余按卡里的设置关着）`) : '',
+        r.regex ? `${r.regex} 条正则` : '',
+    ].filter(Boolean);
+    return `已导入角色「${r.name}」${extra.length ? `：${extra.join('，')}` : ''}`;
+}
 const baseName = (name) => name.replace(/\.[^.]+$/, '');
 
 /** 判断一个 JSON 是什么 */
@@ -39,7 +50,13 @@ export async function importPresetJson(j, name) {
     await api.save('presets', n, j);
     await refreshLists();
     await setPreset(n);
-    toast(`已导入预设「${n}」并切换过去`, 'success');
+    const scripts = scriptsOf(j.extensions);
+    const on = scripts.filter(x => x.enabled).length;
+    const extra = [
+        scripts.length ? (on === scripts.length ? `${on} 个脚本已启用` : `${scripts.length} 个脚本（${on} 个启用）`) : '',
+        j.extensions?.regex_scripts?.length ? `${j.extensions.regex_scripts.length} 条正则` : '',
+    ].filter(Boolean);
+    toast(`已导入预设「${n}」并切换过去${extra.length ? `：自带 ${extra.join('，')}` : ''}`, 'success', extra.length ? 5000 : undefined);
     return n;
 }
 
@@ -93,7 +110,7 @@ export async function importFiles(files) {
                 const r = await api.importCharacter(f);
                 cards++;
                 lastCard = r.file;
-                toast(`已导入角色「${r.name}」${r.world ? `，内嵌世界书存为「${r.world}」` : ''}`, 'success');
+                toast(cardImportedText(r), 'success', 5000);
                 continue;
             }
             if (/\.jsonl$/i.test(f.name)) {
@@ -109,7 +126,7 @@ export async function importFiles(files) {
                     const r = await api.importCharacter(f);
                     cards++;
                     lastCard = r.file;
-                    toast(`已导入角色「${r.name}」${r.world ? `，内嵌世界书存为「${r.world}」` : ''}`, 'success');
+                    toast(cardImportedText(r), 'success', 5000);
                 } else if (kind === 'preset') await importPresetJson(j, baseName(f.name));
                 else if (kind === 'world') await importWorldJson(j, j.name && typeof j.name === 'string' ? j.name : baseName(f.name));
                 else if (kind === 'regex') importRegexJson(j);

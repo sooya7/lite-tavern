@@ -73,7 +73,7 @@ export function renderChat() {
 
 function loadEarlierBtn(label) {
     return h('div', { class: 'load-earlier' },
-        h('button', { class: 'btn small', onclick: () => { renderFrom = Math.max(0, renderFrom - RENDER_WINDOW); rerenderFrom(); } }, label));
+        h('button', { class: 'btn small', onclick: () => { renderFrom = Math.max(0, renderFrom - RENDER_WINDOW); rerenderFrom(); eventSource.emit(event_types.MORE_MESSAGES_LOADED); } }, label));
 }
 
 function rerenderFrom() {
@@ -92,8 +92,10 @@ function buildMessage(i, { streaming = false } = {}) {
     const isLast = i === state.chat.messages.length - 1;
     const user = !!m.is_user;
     const el = h('div', {
-        class: `mes ${user ? 'user' : 'char'} ${m.is_system ? 'hidden-msg' : ''} ${streaming ? 'streaming' : ''} ${isLast ? 'last' : ''}`,
+        // last_mes / swipe_left / swipe_right 是酒馆页面上的类名，角色卡脚本会按它们找元素
+        class: `mes ${user ? 'user' : 'char'} ${m.is_system ? 'hidden-msg' : ''} ${streaming ? 'streaming' : ''} ${isLast ? 'last last_mes' : ''}`,
         mesid: String(i),
+        swipeid: String(m.swipe_id ?? 0),
         is_user: String(user),
         is_system: String(!!m.is_system),
         ch_name: m.name ?? '',
@@ -117,16 +119,16 @@ function buildMessage(i, { streaming = false } = {}) {
         const swipeCount = Array.isArray(m.swipes) && m.swipes.length ? m.swipes.length : 1;
         if (!m.extra?.type && (isLast || swipeCount > 1)) {
             foot.append(h('div', { class: 'swipes' },
-                iconBtn('left', '上一个', () => swipe(i, -1)),
-                h('span', {}, `${Math.min(m.swipe_id ?? 0, swipeCount - 1) + 1}/${swipeCount}`),
-                iconBtn('right', isLast ? '下一个 / 重新生成' : '下一个', () => swipe(i, 1)),
+                iconBtn('left', '上一个', () => swipe(i, -1), 'swipe_left'),
+                h('span', { class: 'swipes-counter' }, `${Math.min(m.swipe_id ?? 0, swipeCount - 1) + 1}/${swipeCount}`),
+                iconBtn('right', isLast ? '下一个 / 重新生成' : '下一个', () => swipe(i, 1), 'swipe_right'),
             ));
         }
         foot.append(tools);
         el.append(
             h('div', { class: 'mes_head' },
                 avatarEl(m),
-                h('span', { class: 'mes_name' }, m.name ?? ''),
+                h('span', { class: 'mes_name name_text' }, m.name ?? ''),
                 h('span', { class: 'mes_time' }, timeText),
                 idTag, hiddenTag),
             h('div', { class: 'mes_block' }, h('div', { class: 'reasoning-slot' }), textEl, foot),
@@ -304,7 +306,13 @@ export function renderComposer() {
         h('div', { class: 'grow' }),
         h('button', { class: 'chip model', type: 'button', id: 'composer-model', title: '切换连接', onclick: (e) => connectionMenu(e.currentTarget) }),
         sendBtn);
-    const box = h('div', { class: 'composer-box' }, textarea, bar);
+    // 酒馆页面上的几个按钮 id，角色卡脚本会用 $('#mes_stop').click() 这类写法触发停止 / 重新生成 / 继续。
+    // 这里放几个看不见的同名元素接住，功能还是走上面那一套（界面上不多出入口）
+    const compat = h('div', { hidden: true, 'aria-hidden': 'true' },
+        h('div', { id: 'mes_stop', onclick: () => stopGeneration() }),
+        h('div', { id: 'option_regenerate', onclick: () => generate('regenerate') }),
+        h('div', { id: 'option_continue', onclick: () => generate('continue') }));
+    const box = h('div', { class: 'composer-box' }, textarea, bar, compat);
     box.addEventListener('mousedown', (e) => { if (e.target === box) { e.preventDefault(); textarea.focus(); } });
     root.append(status, box);
     const fit = () => { textarea.style.height = 'auto'; textarea.style.height = `${Math.min(textarea.scrollHeight, window.innerHeight * 0.4)}px`; };

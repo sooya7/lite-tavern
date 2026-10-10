@@ -8,6 +8,19 @@ import { getPath, setPath, hasPath, unsetPath, clone, isPlainObject, toPath, dee
 
 export const MVU_KEYS = ['stat_data', 'display_data', 'delta_data'];
 
+/** MVU 对外的事件名（与 MagVarUpdate 一致，脚本和前端卡靠这些名字监听） */
+export const MVU_EVENTS = {
+    VARIABLE_INITIALIZED: 'mag_variable_initialized',
+    VARIABLE_UPDATE_STARTED: 'mag_variable_update_started',
+    COMMAND_PARSED: 'mag_command_parsed',
+    VARIABLE_UPDATE_ENDED: 'mag_variable_update_ended',
+    BEFORE_MESSAGE_UPDATE: 'mag_before_message_update',
+    SINGLE_VARIABLE_UPDATED: 'mag_variable_updated',
+};
+
+/** MVU 会在每条 AI 回复末尾补上这个占位符，卡里的正则把它换成状态栏 */
+export const STATUS_PLACEHOLDER = '<StatusPlaceHolderImpl/>';
+
 export function parseYamlOrJson(text) {
     const s = String(text ?? '').trim();
     if (!s) return undefined;
@@ -25,7 +38,7 @@ export function dumpYaml(obj) {
 
 /** 是否像 MVU 卡：酒馆助手脚本里引了 MagVarUpdate，或世界书里有 [initvar] */
 export function detectMvu({ scripts = [], entries = [] } = {}) {
-    const byScript = scripts.some(s => /MagVarUpdate|mvu/i.test(`${s?.name ?? ''} ${s?.content ?? ''}`) && /MagVarUpdate/i.test(s?.content ?? ''));
+    const byScript = scripts.some(s => /MagVarUpdate|MVU-offline|mvu_bundle/i.test(s?.content ?? ''));
     const byEntry = entries.some(e => isInitVarEntry(e));
     return byScript || byEntry;
 }
@@ -131,6 +144,23 @@ function findCallEnd(src, start) {
     return -1;
 }
 
+/** 把参数串按顶层逗号切开，保留每个参数的原文（给监听 mag_command_parsed 的脚本看的就是原文） */
+function splitArgs(src) {
+    const out = [];
+    let depth = 0, inStr = null, start = 0;
+    for (let i = 0; i < src.length; i++) {
+        const ch = src[i];
+        if (inStr) { if (ch === '\\') i++; else if (ch === inStr) inStr = null; continue; }
+        if (ch === '"' || ch === "'" || ch === '`') inStr = ch;
+        else if (ch === '(' || ch === '[' || ch === '{') depth++;
+        else if (ch === ')' || ch === ']' || ch === '}') depth--;
+        else if (ch === ',' && depth === 0) { out.push(src.slice(start, i).trim()); start = i + 1; }
+    }
+    const last = src.slice(start).trim();
+    if (last || out.length) out.push(last);
+    return out.filter((a, i, arr) => a !== '' || i < arr.length - 1);
+}
+
 /** 解析一个 UpdateVariable 块 → 命令列表 */
 export function parseCommands(block) {
     const cmds = [];
@@ -148,7 +178,7 @@ export function parseCommands(block) {
             }
         }
         if (Array.isArray(ops)) {
-            for (const op of ops) if (op && typeof op === 'object' && op.op) cmds.push({ kind: 'patch', ...op });
+            for (const op of ops) if (op && typeof op === 'object' && op.op) cmds.push({ kind: 'patch', ...op, full: JSON.stringify(op) });
         }
     }
     // 旧格式 _.xxx(...)
@@ -158,10 +188,11 @@ export function parseCommands(block) {
         const open = m.index + m[0].length - 1;
         const end = findCallEnd(block, open);
         if (end < 0) break;
-        const args = parseArgs(block.slice(open + 1, end));
+        const inner = block.slice(open + 1, end);
+        const args = parseArgs(inner);
         const tail = block.slice(end + 1, block.indexOf('\n', end) === -1 ? block.length : block.indexOf('\n', end));
         const reason = (tail.match(/\/\/\s*(.*)$/) || [])[1]?.trim() ?? '';
-        cmds.push({ kind: 'legacy', fn: m[1], args, reason });
+        cmds.push({ kind: 'legacy', fn: m[1], args, reason, rawArgs: splitArgs(inner), full: block.slice(m.index, end + 1) });
         re.lastIndex = end + 1;
     }
     return cmds;
@@ -287,7 +318,7 @@ export function applyCommands(statData, cmds) {
                     case 'assign': {
                         const target = getPath(data, path);
                         if (c.args.length >= 3) {
-                            if (Array.isArray(target)) target.splice(Number(a1), 0, a2);
+                            if (Array.isArray(target)) { if (a1 === '-') target.push(a2); else target.splice(Number(a1), 0, a2); }
                             else if (target && typeof target === 'object') target[a1] = a2;
                             else setPath(data, [...path, a1], a2);
                         } else if (Array.isArray(target)) target.push(a1);
@@ -309,6 +340,15 @@ export function applyCommands(statData, cmds) {
                             unsetPath(data, path);
                         }
                         record(path, undefined, undefined, c.reason);
+                        break;
+                    }
+                    case 'move': {
+                        const to = parsePath(a1);
+                        if (!hasPath(data, path)) throw new Error(`移动的源路径不存在: ${path.join('.')}`);
+                        const v = getPath(data, path);
+                        unsetPath(data, path);
+                        setPath(data, to, v);
+                        record(to, undefined, v, c.reason);
                         break;
                     }
                 }
@@ -356,4 +396,103 @@ export function latestMvuVars(chat, upto) {
         if (v && isPlainObject(v.stat_data)) return { index: i, vars: v };
     }
     return null;
+}
+
+// ---------- 带事件的更新流程（有脚本在监听 MVU 事件时走这条路） ----------
+// 事件顺序和参数与 MagVarUpdate（MIT，MagicalAstrogy & StageDog）一致，这样卡里的变量结构脚本
+// （registerMvuSchema）、给变量设上下限的脚本不用改就能工作。
+
+const trimQuotes = (s) => String(s ?? '').replace(/^[\\"'` ]*(.*?)[\\"'` ]*$/, '$1');
+const lodashPath = (segments) => segments.map(seg => `["${String(seg).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"]`).join('');
+const pointerPath = (p) => lodashPath(parsePath(p ?? ''));
+const TYPE_ALIAS = { remove: 'delete', unset: 'delete', assign: 'insert' };
+
+function parseLiteral(raw) {
+    if (typeof raw !== 'string') return raw;
+    try { return JSON.parse(raw); } catch { /* 不是 JSON，按宽松字面量解析 */ }
+    const v = parseArgs(raw);
+    return v.length ? v[0] : trimQuotes(raw);
+}
+
+/** 内部命令 → MVU 的 CommandInfo（参数是原文字符串）。表示不了的（copy）返回 null，留给内置执行 */
+export function toCommandInfo(c) {
+    if (c.kind === 'legacy') {
+        return { type: TYPE_ALIAS[c.fn] ?? c.fn, full_match: c.full ?? '', args: [...(c.rawArgs ?? c.args.map(a => JSON.stringify(a)))], reason: c.reason ?? '' };
+    }
+    const full = c.full ?? JSON.stringify({ op: c.op, path: c.path, value: c.value });
+    const path = pointerPath(c.path ?? c.to);
+    switch (String(c.op).toLowerCase()) {
+        case 'replace': case 'set': return { type: 'set', full_match: full, args: [path, JSON.stringify(c.value)], reason: 'json_patch' };
+        case 'delta': return { type: 'add', full_match: full, args: [path, JSON.stringify(c.value)], reason: 'json_patch' };
+        case 'insert': case 'add': {
+            const parts = parsePath(c.path ?? c.to);
+            const last = String(parts[parts.length - 1] ?? '-');
+            return { type: 'insert', full_match: full, args: [lodashPath(parts.slice(0, -1)), /^\d+$/.test(last) ? last : JSON.stringify(last), JSON.stringify(c.value)], reason: 'json_patch' };
+        }
+        case 'remove': return { type: 'delete', full_match: full, args: [path], reason: 'json_patch' };
+        case 'move': return { type: 'move', full_match: full, args: [pointerPath(c.from), path], reason: 'json_patch' };
+        default: return null;
+    }
+}
+
+/** CommandInfo → 内部命令（监听者可能改过、加过） */
+export function fromCommandInfo(info) {
+    const type = TYPE_ALIAS[info?.type] ?? info?.type;
+    const raw = Array.isArray(info?.args) ? info.args : [];
+    const path = trimQuotes(raw[0]).replace(/^(?:stat_data|status_current_variables)\./, '');
+    const rest = raw.slice(1).map((a, i) => (type === 'move' && i === 0 ? trimQuotes(a).replace(/^(?:stat_data|status_current_variables)\./, '') : parseLiteral(a)));
+    return { kind: 'legacy', fn: type, args: [path, ...rest], reason: info?.reason === 'json_patch' ? '' : (info?.reason ?? '') };
+}
+
+/** 一段 AI 回复里的全部更新命令（内部格式） */
+export function extractCommands(text) {
+    return extractUpdateBlocks(text).flatMap(parseCommands);
+}
+
+/**
+ * 处理一条 AI 消息，过程中发 MVU 事件。监听者可以改命令（mag_command_parsed）、
+ * 改更新后的变量（mag_variable_update_ended）。emit 要等监听者跑完再返回。
+ * @param {object} prevVars 上一层的变量（不会被改）
+ * @param {string} text 消息正文
+ * @param {(name: string, ...args: any[]) => Promise<void>} emit
+ * @returns {Promise<{variables: object, before: object, changed: boolean, errors: string[], commandCount: number}>}
+ */
+export async function processMessageWithEvents(prevVars, text, emit) {
+    const variables = clone(prevVars ?? {});
+    if (!isPlainObject(variables.stat_data)) variables.stat_data = {};
+    const before = clone(variables);
+    await emit(MVU_EVENTS.VARIABLE_UPDATE_STARTED, variables);
+
+    const internal = extractCommands(text);
+    const infos = [];
+    const untranslated = [];
+    for (const c of internal) {
+        const info = toCommandInfo(c);
+        if (info) infos.push(info); else untranslated.push(c);
+    }
+    const errors = [];
+    await emit(MVU_EVENTS.COMMAND_PARSED, variables, infos, text);
+    // 变量结构脚本（MVU zod）在这一步自己校验并执行命令，执行掉的会从列表里拿走，剩下不合结构的在下一步清空
+    await emit(`${MVU_EVENTS.COMMAND_PARSED}_for_zod`, variables, infos, text, (msg) => errors.push(String(msg)));
+    await emit(`${MVU_EVENTS.COMMAND_PARSED}_ended_for_zod`, variables, infos, text);
+
+    const cmds = [...infos.map(fromCommandInfo), ...untranslated];
+    const res = applyCommands(variables.stat_data, cmds);
+    variables.stat_data = res.data;
+    variables.display_data = buildDisplayData(res.data, res.delta);
+    variables.delta_data = res.delta;
+    errors.push(...res.errors);
+
+    await emit(MVU_EVENTS.VARIABLE_UPDATE_ENDED, variables, before);
+    await emit(`${MVU_EVENTS.VARIABLE_UPDATE_ENDED}_for_zod`, variables, before);
+    const changed = internal.length > 0 || JSON.stringify(variables.stat_data) !== JSON.stringify(before.stat_data);
+    return { variables, before, changed, errors, commandCount: internal.length };
+}
+
+/** 给消息正文补上状态栏占位符，并去掉 AI 抄回来的 <status_current_variable> 块 */
+export function withStatusPlaceholder(text) {
+    let out = String(text ?? '');
+    if (out.includes('<status_current_variable>')) out = out.replace(/<(status_current_variable)>(?:(?!<\1>)[\s\S])*<\/\1?>/gi, '');
+    if (!out.includes(STATUS_PLACEHOLDER)) out += `\n\n${STATUS_PLACEHOLDER}`;
+    return out;
 }

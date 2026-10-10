@@ -59,6 +59,10 @@ export const FEATURES = [
     // ---- 角色 › 正则
     { t: '正则脚本（全局 / 角色 / 预设）', tab: 'regex', k: 'regex 替换 美化 仅显示' },
 
+    // ---- 角色 › 脚本
+    { t: '酒馆助手脚本（角色卡 / 预设自带）', tab: 'scripts', find: '运行角色卡和预设自带的脚本', k: 'tavern helper js-slash-runner 小手机 悬浮窗 状态栏 变量结构 zod 脚本库' },
+    { t: '重新加载脚本', tab: 'scripts', find: ['全部重新加载', '酒馆助手脚本'], k: 'reload 重启 脚本没反应' },
+
     // ---- 本聊天
     { t: '作者注释', tab: 'note', find: '作者注释（只对这个聊天生效）', k: "author's note 本聊天 备注 注入" },
     { t: '聊天绑定的世界书', tab: 'note', find: '绑定世界书（只对这个聊天生效）', k: 'lorebook chat 本聊天' },
@@ -92,6 +96,8 @@ export const FEATURES = [
     // ---- 通用 › 导入
     { t: '导入文件（角色卡 / 预设 / 世界书 / 正则 / 聊天）', tab: 'import', find: '导入文件', k: 'png json jsonl 导入角色卡 上传' },
     { t: '从酒馆搬数据', tab: 'import', find: '从酒馆数据目录导入', k: 'sillytavern 迁移 搬家 批量 酒馆导入' },
+    { t: '导入酒馆里的 API 连接', tab: 'import', find: '从酒馆数据目录导入', k: 'luker sillytavern 连接配置 key 密钥 迁移 接口' },
+    { t: '与酒馆共用数据', tab: 'import', find: '与酒馆共用数据', k: 'luker sillytavern 共享 同一份 数据目录 同步' },
 
     // ---- 面板外的动作
     { t: '新聊天', action: 'newChat', k: '开新聊天 new chat 重开' },

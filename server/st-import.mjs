@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
+import crypto from 'node:crypto';
 import { readCardJson } from '../public/js/core/png.js';
 import { normalizeRegexScript } from '../public/js/core/regex.js';
 import { HttpError } from './http.mjs';
@@ -48,11 +49,101 @@ async function keepMtime(src, dest) {
     } catch { /* 时间戳只影响排序 */ }
 }
 
+// ---------- 酒馆里配置的 API 连接 ----------
+
+/**
+ * 酒馆的对话补全来源 → 这边的连接类型。base 是官方地址（custom 的地址在连接配置里），
+ * secret 是 secrets.json 里放 Key 的那一项，model 是 oai_settings 里记模型名的那一项。
+ * 没列在这里的来源（文本补全、Vertex、Azure 等）请求格式对不上，导入时会说明跳过。
+ */
+const ST_SOURCES = {
+    custom: { provider: 'openai', base: '', secret: 'api_key_custom', model: 'custom_model' },
+    openai: { provider: 'openai', base: 'https://api.openai.com/v1', secret: 'api_key_openai', model: 'openai_model', proxy: true },
+    claude: { provider: 'claude', base: 'https://api.anthropic.com', secret: 'api_key_claude', model: 'claude_model', proxy: true },
+    makersuite: { provider: 'gemini', base: 'https://generativelanguage.googleapis.com', secret: 'api_key_makersuite', model: 'google_model' },
+    deepseek: { provider: 'openai', base: 'https://api.deepseek.com/v1', secret: 'api_key_deepseek', model: 'deepseek_model' },
+    openrouter: { provider: 'openai', base: 'https://openrouter.ai/api/v1', secret: 'api_key_openrouter', model: 'openrouter_model' },
+    mistralai: { provider: 'openai', base: 'https://api.mistral.ai/v1', secret: 'api_key_mistralai', model: 'mistralai_model' },
+    groq: { provider: 'openai', base: 'https://api.groq.com/openai/v1', secret: 'api_key_groq', model: 'groq_model' },
+    xai: { provider: 'openai', base: 'https://api.x.ai/v1', secret: 'api_key_xai', model: 'xai_model' },
+    moonshot: { provider: 'openai', base: 'https://api.moonshot.ai/v1', secret: 'api_key_moonshot', model: 'moonshot_model' },
+    siliconflow: { provider: 'openai', base: 'https://api.siliconflow.com/v1', secret: 'api_key_siliconflow', model: 'siliconflow_model' },
+};
+
+const trimUrl = (u) => String(u ?? '').trim().replace(/\/+$/, '');
+
+const POST_PROCESSING = { merge: 'merge', merge_tools: 'merge', semi: 'semi', semi_tools: 'semi', strict: 'strict', strict_tools: 'strict', single: 'single' };
+
+/**
+ * secrets.json 里一项可能是字符串（老版本），也可能是 [{id, value, label, active}]（能存多个 Key 的新版本）。
+ * 连接配置指定了用哪个 Key（secretId）就只认那一个，找不到宁可留空：
+ * 同一类来源下可能存着好几家中转的 Key，拿错了就等于把这家的 Key 发给了另一家。
+ * anyOk：这类来源只有一个官方地址，随便哪个 Key 都是发给同一家，才允许退而求其次。
+ */
+function pickSecret(entry, secretId, anyOk) {
+    if (typeof entry === 'string') return secretId || !anyOk ? '' : entry;
+    if (!Array.isArray(entry)) return '';
+    const hit = secretId ? entry.find(x => x?.id === secretId) : anyOk ? (entry.find(x => x?.active && x.value) ?? entry.find(x => x?.value)) : null;
+    return String(hit?.value ?? '');
+}
+
+/**
+ * 读出酒馆里配好的连接：优先用“连接配置”（Connection Profiles）里存的每一条；一条都没有就取当前正在用的那个。
+ * @param {object} st 酒馆的 settings.json
+ * @param {object} secrets 酒馆的 secrets.json
+ * @returns {{list: object[], skipped: string[]}} list 每项 {stProfile, name, provider, baseUrl, model, postProcessing, key}
+ */
+export function readStConnections(st, secrets = {}) {
+    const oai = st?.oai_settings ?? {};
+    const proxies = Array.isArray(st?.proxies) ? st.proxies : [];
+    const list = [];
+    const skipped = [];
+    const build = ({ id, name, api, url, model, secretId, proxyName, post }) => {
+        const src = ST_SOURCES[api];
+        if (!src) { skipped.push(`连接 ${name}（来源 ${api || '未知'} 这边还不支持）`); return; }
+        let baseUrl = src.base;
+        if (api === 'custom') baseUrl = String(url ?? '').trim();
+        // 自定义地址：没指定 Key 时，只有地址正是酒馆当前在用的那个，才能用当前生效的 Key
+        const sameAsCurrent = api !== 'custom' || trimUrl(baseUrl) === trimUrl(oai.custom_url);
+        let key = pickSecret(secrets[src.secret], secretId, sameAsCurrent);
+        const proxy = src.proxy ? proxies.find(p => p?.name === proxyName && p.url) : null;
+        if (proxy) {
+            // 反向代理：地址和密码都用代理的。Claude 这边会自己补 /v1，代理地址末尾的 /v1 要去掉
+            baseUrl = String(proxy.url).trim();
+            if (src.provider === 'claude') baseUrl = baseUrl.replace(/\/+$/, '').replace(/\/v1$/, '');
+            if (proxy.password) key = String(proxy.password);
+        }
+        baseUrl = baseUrl.replace(/\/+$/, '');
+        if (!/^https?:\/\//i.test(baseUrl)) { skipped.push(`连接 ${name}（没有填接口地址）`); return; }
+        list.push({ stProfile: id, name, provider: src.provider, baseUrl, model: String(model ?? ''), postProcessing: POST_PROCESSING[post] ?? '', key });
+    };
+    const profiles = st?.extension_settings?.connectionManager?.profiles;
+    for (const p of Array.isArray(profiles) ? profiles : []) {
+        if (!p || typeof p !== 'object') continue;
+        const name = String(p.name || '未命名连接');
+        if (p.mode && p.mode !== 'cc') { skipped.push(`连接 ${name}（文本补全接口这边不支持）`); continue; }
+        build({
+            id: String(p.id ?? name), name, api: p.api,
+            url: p['api-url'], model: p.model, secretId: p['secret-id'], proxyName: p.proxy,
+            post: p['prompt-post-processing'] ?? oai.custom_prompt_post_processing,
+        });
+    }
+    if (!list.length && !skipped.length && st?.main_api === 'openai' && oai.chat_completion_source) {
+        const api = oai.chat_completion_source;
+        build({
+            id: `current:${api}`, name: '酒馆当前连接', api,
+            url: oai.custom_url, model: oai[ST_SOURCES[api]?.model], secretId: '', proxyName: st?.selected_proxy?.name,
+            post: oai.custom_prompt_post_processing,
+        });
+    }
+    return { list, skipped };
+}
+
 const listFiles = async (dir, re) => {
     try { return (await fsp.readdir(dir)).filter(f => re.test(f)); } catch { return []; }
 };
 
-export async function scanStDir(dir) {
+export async function scanStDir(dir, store) {
     const root = assertStDir(dir);
     const characters = [];
     for (const f of await listFiles(path.join(root, 'characters'), /\.(png|json)$/i)) {
@@ -74,6 +165,9 @@ export async function scanStDir(dir) {
     const pu = settings?.power_user ?? {};
     return {
         dir: root,
+        // 这个目录就是正在共用的那个：角色卡、聊天、世界书、预设本来就是同一份，只剩设置类的东西可导
+        shared: !!store?.stData && root === store.stData,
+        connectionCount: settings ? readStConnections(settings).list.length : 0,
         characters,
         presets,
         worlds,
@@ -90,8 +184,12 @@ export async function scanStDir(dir) {
  */
 export async function importFromSt(store, sel) {
     const root = assertStDir(sel.dir);
-    const report = { characters: [], chats: 0, presets: [], worlds: [], regex: 0, personas: 0, skipped: [], errors: [] };
+    const report = { characters: [], chats: 0, presets: [], worlds: [], regex: 0, personas: 0, connections: [], skipped: [], errors: [] };
     const settings = await store.getSettings();
+    if (store.stData && root === store.stData) {
+        // 源目录就是共用的那个目录，文件已经是同一份，不能自己往自己身上拷
+        sel = { ...sel, characters: [], presets: [], worlds: [] };
+    }
 
     for (const name of sel.worlds ?? []) {
         try {
@@ -197,6 +295,37 @@ export async function importFromSt(store, sel) {
             settings.variables = settings.variables ?? {};
             settings.variables.global = { ...st.extension_settings.variables.global, ...(settings.variables.global ?? {}) };
         }
+    }
+    if (st && sel.connections) {
+        let secrets = {};
+        try { secrets = JSON.parse(await fsp.readFile(path.join(root, 'secrets.json'), 'utf8')); } catch { /* 没有密钥文件就只导地址和模型 */ }
+        const { list, skipped } = readStConnections(st, secrets);
+        report.skipped.push(...skipped);
+        settings.connections = settings.connections ?? [];
+        for (const c of list) {
+            const { key, ...conn } = c;
+            // 认得出来的（上次导过的，或者手动建的同地址同模型的那条）不重复建
+            let cur = settings.connections.find(x => x.stProfile === c.stProfile)
+                ?? settings.connections.find(x => !x.stProfile && x.provider === c.provider && String(x.baseUrl ?? '').replace(/\/+$/, '') === c.baseUrl && x.model === c.model);
+            if (cur && !sel.overwrite) {
+                cur.stProfile = c.stProfile;
+                report.skipped.push(`连接 ${c.name}（已存在）`);
+                continue;
+            }
+            if (cur) Object.assign(cur, conn);
+            else {
+                cur = {
+                    id: `c_${crypto.randomUUID().slice(0, 8)}`,
+                    prefillAsAssistant: false, sendExtraSamplers: false, thinkingBudget: 0, includeThoughts: true, extraBody: '', extraHeaders: '',
+                    ...conn,
+                };
+                settings.connections.push(cur);
+            }
+            // Key 只在服务端两个文件之间搬，不经过浏览器
+            if (key) await store.setSecret(cur.id, key);
+            report.connections.push(key ? c.name : `${c.name}（酒馆里没存 Key）`);
+        }
+        if (!settings.connections.some(x => x.id === settings.activeConnection) && settings.connections.length) settings.activeConnection = settings.connections[0].id;
     }
     await store.saveSettings(settings);
     return report;

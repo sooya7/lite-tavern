@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import zlib from 'node:zlib';
+import crypto from 'node:crypto';
 import { readCardJson, writeCardPng, isPng, extractChunks } from '../public/js/core/png.js';
 import { normalizeCard, toExportCard } from '../public/js/core/card.js';
 import { characterBookToWorld, normalizeWorld } from '../public/js/core/worldinfo.js';
@@ -10,6 +11,16 @@ import { HttpError } from './http.mjs';
 import { makeThumbnail } from './thumb.mjs';
 
 export const DIRS = ['characters', 'chats', 'presets', 'worlds', 'avatars', 'backups', 'trash', 'extensions', 'files'];
+
+/**
+ * 与酒馆（SillyTavern / Luker）共用数据：这几类内容直接读写酒馆用户数据目录里对应的子目录，
+ * 两边看到的是同一份文件。设置、密钥、头像、备份、回收站各用各的（结构不一样，没法共用）。
+ */
+export const SHARED_DIRS = { characters: 'characters', chats: 'chats', worlds: 'worlds', presets: 'OpenAI Settings' };
+
+/** Luker 给每个聊天存的附属文件：<聊天名>.luker-state.<用途>.json，改名、删除时要跟着走 */
+const SIDECAR_MARK = '.luker-state.';
+const SYNC_SIDECAR = `${SIDECAR_MARK}chat_sync.json`;
 
 export function sanitizeName(name) {
     const s = String(name ?? '')
@@ -22,17 +33,36 @@ export function sanitizeName(name) {
 }
 
 export class Store {
-    constructor(root) {
+    /**
+     * @param {string} root 自己的数据目录
+     * @param {{stData?: string}} [opts] stData：酒馆的用户数据目录，填了就和它共用角色卡、聊天、世界书、预设
+     */
+    constructor(root, { stData = '' } = {}) {
         this.root = path.resolve(root);
-        for (const d of DIRS) fs.mkdirSync(path.join(this.root, d), { recursive: true });
+        this.stData = '';
+        this.shared = null;
+        if (stData) {
+            const st = path.resolve(String(stData));
+            if (!fs.existsSync(path.join(st, 'characters')) || !fs.existsSync(path.join(st, 'chats'))) {
+                throw new Error(`这不像酒馆的用户数据目录（里面应该有 characters、chats 等子目录）：${st}`);
+            }
+            if (st === this.root || st.startsWith(this.root + path.sep) || this.root.startsWith(st + path.sep)) {
+                throw new Error('酒馆数据目录和自己的数据目录不能互相包含（两边的 settings.json 会打架）');
+            }
+            this.stData = st;
+            this.shared = Object.fromEntries(Object.entries(SHARED_DIRS).map(([kind, dir]) => [kind, path.join(st, dir)]));
+        }
+        for (const d of DIRS) fs.mkdirSync(this.shared?.[d] ?? path.join(this.root, d), { recursive: true });
         this.cardMeta = new Map(); // file → {mtime, meta}
         this.lastBackup = new Map();
         this.thumbJobs = new Map(); // 同一张缩略图并发请求只生成一次
     }
 
     p(...parts) {
-        const full = path.resolve(this.root, ...parts);
-        if (!full.startsWith(this.root)) throw new HttpError(400, '路径越界');
+        const base = this.shared?.[parts[0]];
+        const root = base ?? this.root;
+        const full = base ? path.resolve(base, ...parts.slice(1)) : path.resolve(this.root, ...parts);
+        if (full !== root && !full.startsWith(root + path.sep)) throw new HttpError(400, '路径越界');
         return full;
     }
 
@@ -52,11 +82,49 @@ export class Store {
         }
     }
 
+    /** 回收站始终在自己的数据目录里：共用模式下删掉的东西酒馆那边就看不到了，但这里还能找回来 */
     async moveToTrash(file) {
-        const rel = path.relative(this.root, file);
+        let rel = path.relative(this.root, file);
+        for (const [kind, dir] of Object.entries(this.shared ?? {})) {
+            if (file.startsWith(dir + path.sep)) rel = path.join(kind, path.relative(dir, file));
+        }
         const dest = this.p('trash', `${Date.now()}-${rel.replace(/[\\/]/g, '__')}`);
-        await fsp.rename(file, dest);
+        try {
+            await fsp.rename(file, dest);
+        } catch (e) {
+            if (e.code !== 'EXDEV') throw e;
+            // 两个目录不在同一块盘上，不能直接改名
+            await fsp.cp(file, dest, { recursive: true });
+            await fsp.rm(file, { recursive: true, force: true });
+        }
         return dest;
+    }
+
+    /** 文件的版本号：谁写一次就会变。读的时候发给前端，保存时带回来，对不上就说明中间被别处改过 */
+    async fileVersion(file) {
+        try {
+            const st = await fsp.stat(file);
+            return `${Math.floor(st.mtimeMs)}-${st.size}`;
+        } catch {
+            return '';
+        }
+    }
+
+    /** kind：characters / presets / worlds；name：角色卡带扩展名的文件名，其余是不带 .json 的名字 */
+    versionOf(kind, name) {
+        return this.fileVersion(this.p(kind, kind === 'characters' ? sanitizeName(name) : `${sanitizeName(name)}.json`));
+    }
+
+    /**
+     * 保存前核对：前端带了版本号（expect），而磁盘上已经不是那一版，就拒绝（409 conflict）。
+     * 没带版本号不查（新建、导入覆盖这类本来就没读过的情况）；force 是用户明确选了覆盖，覆盖前留一份备份。
+     */
+    async guardWrite(file, { expect = '', force = false } = {}, what = '这个文件', backup = null) {
+        if (!expect) return;
+        const current = await this.fileVersion(file);
+        if (!current || current === expect) return;
+        if (!force) throw new HttpError(409, `${what}在别处被改过了`, 'conflict');
+        if (backup) await this.backupFile(file, backup.sub, backup.base, backup.keep ?? 5);
     }
 
     // ---------- 设置与密钥 ----------
@@ -175,8 +243,9 @@ export class Store {
         return { file, card, world };
     }
 
-    async saveCard(file, card) {
+    async saveCard(file, card, check = {}) {
         const full = this.p('characters', sanitizeName(file));
+        await this.guardWrite(full, check, '这张角色卡', { sub: 'characters', base: sanitizeName(file).replace(/\.(png|json)$/i, ''), keep: 3 });
         let image;
         try {
             const buf = new Uint8Array(await fsp.readFile(full));
@@ -261,19 +330,61 @@ export class Store {
         return out.sort((a, b) => b.mtime - a.mtime);
     }
 
-    async readChat(charId, name) {
-        return fsp.readFile(path.join(this.chatDir(charId), `${sanitizeName(name)}.jsonl`), 'utf8');
+    chatFile(charId, name) {
+        return path.join(this.chatDir(charId), `${sanitizeName(name)}.jsonl`);
     }
 
-    async saveChat(charId, name, text, { backupEveryMs = 10 * 60 * 1000 } = {}) {
-        const file = path.join(this.chatDir(charId), `${sanitizeName(name)}.jsonl`);
+    /** 聊天文件的版本号：任何一方（酒馆、另一个窗口）一写就会变，保存时拿它判断“我手里的还是不是最新的” */
+    chatVersion(charId, name) {
+        return this.fileVersion(this.chatFile(charId, name));
+    }
+
+    async readChat(charId, name) {
+        return fsp.readFile(this.chatFile(charId, name), 'utf8');
+    }
+
+    /**
+     * @param {{expect?: string, force?: boolean, backupEveryMs?: number}} [o]
+     *   expect：读这个聊天时拿到的版本号。磁盘上的已经不是这个版本就拒绝（409 chat-conflict），force 跳过检查。
+     *   聊天比别的文件管得严：文件已经在了却没带版本号也拒绝——聊天最容易两边同时在写，写错了也最心疼。
+     * @returns {Promise<string>} 写完之后的版本号
+     */
+    async saveChat(charId, name, text, { expect = '', force = false, backupEveryMs = 10 * 60 * 1000 } = {}) {
+        const file = this.chatFile(charId, name);
+        if (!force) {
+            const current = await this.chatVersion(charId, name);
+            if (current && current !== expect) throw new HttpError(409, expect ? '这个聊天在别处被改过了' : '这个聊天已经存在，保存时却没带版本号', 'chat-conflict');
+        }
         const key = `${charId}/${name}`;
         const last = this.lastBackup.get(key) ?? 0;
-        if (Date.now() - last > backupEveryMs && fs.existsSync(file)) {
+        if ((Date.now() - last > backupEveryMs || (force && expect)) && fs.existsSync(file)) {
+            // 强行覆盖别处的修改之前一定留一份，后悔了还能找回来
             this.lastBackup.set(key, Date.now());
             await this.backupFile(file, `chats/${sanitizeName(charId)}`, sanitizeName(name), 8);
         }
+        let integrity = '';
+        if (this.shared) ({ text, integrity } = stampIntegrity(text));
         await this.writeAtomic(file, text);
+        // 先写聊天再写标记：万一酒馆正好卡在中间写了一笔，它下一次保存会对不上标记而被拦下来
+        if (integrity) await this.rotateSyncSidecar(file, integrity);
+        return this.chatVersion(charId, name);
+    }
+
+    /** Luker 把聊天的校验标记另存在旁边的文件里，并且以它为准；这个文件在才更新（原版酒馆只看聊天第一行） */
+    async rotateSyncSidecar(chatFile, integrity) {
+        const sidecar = chatFile.replace(/\.jsonl$/, '') + SYNC_SIDECAR;
+        if (!fs.existsSync(sidecar)) return;
+        await this.writeAtomic(sidecar, JSON.stringify({ integrity, updated_at: Date.now() }));
+    }
+
+    /** 跟着这个聊天走的附属文件（Luker 的记忆图谱、同步标记等） */
+    async chatSidecars(charId, name) {
+        const prefix = `${sanitizeName(name)}${SIDECAR_MARK}`;
+        try {
+            return (await fsp.readdir(this.chatDir(charId))).filter(f => f.startsWith(prefix) && f.endsWith('.json'));
+        } catch {
+            return [];
+        }
     }
 
     async backupFile(file, sub, base, keep) {
@@ -289,11 +400,17 @@ export class Store {
         const dir = this.chatDir(charId);
         const dest = path.join(dir, `${sanitizeName(to)}.jsonl`);
         if (fs.existsSync(dest)) throw new HttpError(409, '已存在同名聊天');
-        await fsp.rename(path.join(dir, `${sanitizeName(from)}.jsonl`), dest);
+        const sidecars = await this.chatSidecars(charId, from);
+        await fsp.rename(this.chatFile(charId, from), dest);
+        for (const f of sidecars) {
+            await fsp.rename(path.join(dir, f), path.join(dir, sanitizeName(to) + f.slice(sanitizeName(from).length))).catch(() => {});
+        }
     }
 
     async deleteChat(charId, name) {
-        await this.moveToTrash(path.join(this.chatDir(charId), `${sanitizeName(name)}.jsonl`));
+        const sidecars = await this.chatSidecars(charId, name);
+        await this.moveToTrash(this.chatFile(charId, name));
+        for (const f of sidecars) await this.moveToTrash(path.join(this.chatDir(charId), f)).catch(() => {});
     }
 
     // ---------- 预设 / 世界书（同构的 JSON 目录） ----------
@@ -315,8 +432,9 @@ export class Store {
         return data;
     }
 
-    async saveJson(kind, name, data) {
+    async saveJson(kind, name, data, check = {}) {
         const file = this.p(kind, `${sanitizeName(name)}.json`);
+        await this.guardWrite(file, check, kind === 'worlds' ? '这本世界书' : '这个预设', { sub: kind, base: sanitizeName(name) });
         if (kind === 'worlds' && fs.existsSync(file)) {
             const key = `${kind}/${name}`;
             if (Date.now() - (this.lastBackup.get(key) ?? 0) > 10 * 60 * 1000) {
@@ -337,6 +455,25 @@ export class Store {
         if (fs.existsSync(dest)) throw new HttpError(409, '已存在同名文件');
         await fsp.rename(this.p(kind, `${sanitizeName(from)}.json`), dest);
     }
+}
+
+/**
+ * 给聊天第一行换一个新的 integrity 标记（共用模式下每次保存都换）。
+ * 酒馆保存聊天时会核对这个标记：它那边开着旧内容再保存，就会提示而不是悄悄把这边刚写的盖掉。
+ * 第一行不是聊天头就原样返回。
+ */
+export function stampIntegrity(text) {
+    const nl = text.indexOf('\n');
+    const first = nl < 0 ? text : text.slice(0, nl);
+    let header;
+    try { header = JSON.parse(first.replace(/^\uFEFF/, '')); } catch { return { text, integrity: '' }; }
+    const isHeader = header && typeof header === 'object' && !Array.isArray(header) && header.mes === undefined
+        && (header.chat_metadata !== undefined || header.user_name !== undefined);
+    if (!isHeader) return { text, integrity: '' };
+    const integrity = crypto.randomUUID();
+    const meta = header.chat_metadata && typeof header.chat_metadata === 'object' && !Array.isArray(header.chat_metadata) ? header.chat_metadata : {};
+    header.chat_metadata = { ...meta, integrity };
+    return { text: JSON.stringify(header) + (nl < 0 ? '\n' : text.slice(nl)), integrity };
 }
 
 /** 统计聊天条数与最后一条消息预览（只读尾部） */

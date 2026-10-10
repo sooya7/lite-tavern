@@ -9,6 +9,8 @@ import * as preset from './preset.js';
 import * as char from './char.js';
 import * as world from './world.js';
 import * as regex from './regex.js';
+import * as scripts from './scripts.js';
+import { parkScriptSettings } from '../scripts.js';
 import * as persona from './persona.js';
 import * as note from './note.js';
 import * as vars from './vars.js';
@@ -16,7 +18,7 @@ import * as inspector from './inspector.js';
 import * as settings from './settings.js';
 import * as importer from './import.js';
 
-const MODS = { connection, preset, char, world, regex, persona, note, vars, inspector, settings, import: importer };
+const MODS = { connection, preset, char, world, regex, scripts, persona, note, vars, inspector, settings, import: importer };
 
 export const TABS = Object.keys(MODS).map(id => ({ id, label: TAB_LABELS[id], mod: MODS[id] }));
 
@@ -160,6 +162,8 @@ export function renderPanels() {
         onclick: () => selectTab(id),
     }, TAB_LABELS[id])));
 
+    // 脚本自己的设置界面是常驻节点，重绘前先搬走，不然会跟着面板内容一起被清掉
+    parkScriptSettings();
     clear(body);
     try {
         tab.mod.render(body);

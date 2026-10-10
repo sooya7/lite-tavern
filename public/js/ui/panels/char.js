@@ -62,8 +62,7 @@ export function render(body) {
     if (th.length || rx.length) {
         body.append(section('卡里自带的扩展内容',
             rx.length ? h('div', { class: 'small' }, `局部正则 ${rx.length} 条（在「正则」面板里管理）`) : null,
-            th.length ? h('div', { class: 'small' }, `酒馆助手脚本 ${th.length} 个：${th.map(x => x.name).filter(Boolean).slice(0, 6).join('、')}`) : null,
-            th.length ? h('div', { class: 'hint' }, '脚本本身不会执行；MVU 变量、代码块里的前端界面已内置兼容。依赖操作酒馆页面的脚本无法工作。') : null,
+            th.length ? h('div', { class: 'small' }, `酒馆助手脚本 ${th.length} 个（在「脚本」面板里管理）：${th.map(x => x.name).filter(Boolean).slice(0, 6).join('、')}`) : null,
         ));
     }
 

@@ -1,7 +1,12 @@
 # 端到端测试：无头浏览器跑一遍主要流程（连接、导入卡、MVU、前端卡、世界书、EJS、重刷、重试、停止、编辑、
-# 提示词预览、Claude/Gemini 格式、设置面板分组与搜索、菜单入口、刷新恢复、手机布局）。依赖：python playwright + tools/mock-llm.mjs。
+# 提示词预览、Claude/Gemini 格式、设置面板分组与搜索、菜单入口、刷新恢复、酒馆助手脚本、手机布局）。依赖：python playwright + tools/mock-llm.mjs。
+# 不需要外网：脚本要从 jsdelivr 取的 zod 和 MVU 变量结构库在这里用下面的替身顶上（真库要联网，另行在部署环境验证）。
 # 用法：先起 mock（node tools/mock-llm.mjs 8799）和服务（node server.mjs --port 8731 --data <空目录>），再
 #   python tools/e2e.py
+# 想连“与酒馆共用数据”一起测：node tools/fake-st-dir.mjs <目录> 造一个假的酒馆数据目录，另起一个实例
+#   node server.mjs --port 8732 --data <另一个空目录> --st-data <目录>
+# 有 HTTP 代理的环境加 NO_PROXY=127.0.0.1,localhost；用系统 Chromium 时加 LT_CHROMIUM=/usr/bin/chromium。
+# 再带上 LT_SHARED_URL=http://127.0.0.1:8732 LT_SHARED_DIR=<目录> LT_SHARED_OWN=<另一个空目录> 跑。
 import json
 import os
 import sys
@@ -14,6 +19,64 @@ BASE = os.environ.get('LT_URL', 'http://127.0.0.1:8731')
 MOCK = os.environ.get('MOCK_URL', 'http://127.0.0.1:8799')
 SHOTS = os.environ.get('LT_SHOTS', os.path.join(os.environ.get('TEMP', '/tmp'), 'lt-shots'))
 FIXTURE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures', 'test-card.json')
+SCRIPT_CARD = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures', 'script-card.json')
+SCRIPT_PRESET = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures', 'script-preset.json')
+# 共用酒馆数据目录的那几项：另起一个带 --st-data 的实例，三个都给了才跑
+SHARED_URL = os.environ.get('LT_SHARED_URL', '')
+SHARED_DIR = os.environ.get('LT_SHARED_DIR', '')  # 假的酒馆用户数据目录
+SHARED_OWN = os.environ.get('LT_SHARED_OWN', '')  # 那个实例自己的数据目录
+
+# zod 的替身：只实现脚本测试卡用到的那几个写法（object / string / coerce.number / transform / prefault / safeParse）
+FAKE_ZOD = r'''
+const node = (parse) => ({
+  _parse: parse,
+  transform(fn) { return node((v) => fn(parse(v))); },
+  prefault(d) { return node((v) => parse(v === undefined ? d : v)); },
+  safeParse(v) { try { return { success: true, data: parse(v) }; } catch (e) { return { success: false, error: e }; } },
+});
+const string = () => node((v) => { if (typeof v !== 'string') throw new Error('不是字符串'); return v; });
+const number = () => node((v) => { const n = Number(v); if (Number.isNaN(n)) throw new Error('不是数字'); return n; });
+const object = (shape) => Object.assign(node((v) => {
+  const out = { ...(v ?? {}) };
+  for (const [k, t] of Object.entries(shape)) out[k] = t._parse(out[k]);
+  return out;
+}), { shape });
+const api = { object, string, number, coerce: { number }, prettifyError: (e) => String(e?.message ?? e) };
+export const z = api;
+export { object, string, number };
+export const coerce = { number };
+export default api;
+'''
+
+# MVU 变量结构库（registerMvuSchema）的替身：按真库的事件约定来——初始化时补默认值；
+# 更新时自己执行并拿走命令，剩下的清空；结束时去掉 display_data / delta_data
+FAKE_MVU_ZOD = r'''
+export function registerMvuSchema(schema) {
+  const trim = (s) => String(s).replace(/^[\\"'` ]*(.*?)[\\"'` ]*$/, '$1');
+  const lit = (s) => { try { return JSON.parse(s); } catch { return trim(s); } };
+  eventOn('mag_variable_initialized', (variables) => {
+    const r = schema.safeParse(variables.stat_data);
+    if (r.success) variables.stat_data = { ...variables.stat_data, ...r.data };
+  });
+  eventOn('mag_command_parsed_for_zod', (variables, commands) => {
+    const done = [];
+    commands.forEach((c, i) => {
+      const next = _.cloneDeep(variables.stat_data);
+      const path = trim(c.args[0]);
+      if (c.type === 'set') _.set(next, path, lit(c.args.at(-1)));
+      else if (c.type === 'add') _.update(next, path, (v) => v + Number(lit(c.args[1])));
+      else return;
+      const r = schema.safeParse(next);
+      if (!r.success) return;
+      variables.stat_data = { ...variables.stat_data, ...r.data };
+      done.push(i);
+    });
+    _.pullAt(commands, done);
+  });
+  eventOn('mag_command_parsed_ended_for_zod', (variables, commands) => { commands.length = 0; });
+  eventOn('mag_variable_update_ended_for_zod', (variables) => { _.unset(variables, 'display_data'); _.unset(variables, 'delta_data'); });
+}
+'''
 os.makedirs(SHOTS, exist_ok=True)
 
 results = []
@@ -50,7 +113,7 @@ def mock(path):
 # 设置面板：分区 → 所在分组（和 public/js/ui/panels/nav.js 一致）
 SECTION_GROUP = {
     '连接': 'model', '预设': 'model',
-    '角色卡': 'char', '世界书': 'char', '正则': 'char',
+    '角色卡': 'char', '世界书': 'char', '正则': 'char', '脚本': 'char',
     '作者注释': 'chat', '变量': 'chat', '提示词预览': 'chat',
     '用户设定': 'general', '外观与行为': 'general', '导入': 'general',
 }
@@ -112,8 +175,16 @@ def assert_in(needle, hay, what=''):
 def main():
     global page
     with sync_playwright() as p:
-        browser = p.chromium.launch()
+        browser = p.chromium.launch(executable_path=os.environ.get('LT_CHROMIUM') or None)
         ctx = browser.new_context(viewport={'width': 1440, 'height': 900}, locale='zh-CN')
+
+        def offline_cdn(context):
+            # 后注册的优先：先把 jsdelivr 整个掐掉（测试环境没有外网，掐掉比等超时快），再放行两个替身
+            js = {'content_type': 'text/javascript; charset=utf-8', 'headers': {'access-control-allow-origin': '*'}}
+            context.route('https://*.jsdelivr.net/**', lambda r: r.abort())
+            context.route('https://*.jsdelivr.net/npm/zod@*/+esm', lambda r: r.fulfill(body=FAKE_ZOD, **js))
+            context.route('https://*.jsdelivr.net/gh/StageDog/tavern_resource/dist/util/mvu_zod.js', lambda r: r.fulfill(body=FAKE_MVU_ZOD, **js))
+        offline_cdn(ctx)
         page = ctx.new_page()
         page.on('console', lambda m: errors.append(f'console.{m.type}: {m.text}') if m.type in ('error',) else None)
         page.on('pageerror', lambda e: errors.append(f'pageerror: {e} @ {" | ".join((getattr(e, "stack", "") or "").splitlines()[1:3]).strip()}'))
@@ -321,7 +392,7 @@ def main():
             assert groups == ['模型', '角色', '本聊天', '通用'], groups
             want = {
                 'model': ['连接', '预设'],
-                'char': ['角色卡', '世界书', '正则'],
+                'char': ['角色卡', '世界书', '正则', '脚本'],
                 'chat': ['作者注释', '变量', '提示词预览'],
                 'general': ['用户设定', '外观与行为', '导入'],
             }
@@ -342,7 +413,7 @@ def main():
             page.wait_for_timeout(120)
             assert page.locator('#right .seg-tab.active').inner_text().strip() == '世界书'
             shot('08-settings-groups')
-        run('设置面板：4 个分组、11 个分区都能打开', settings_groups)
+        run('设置面板：4 个分组、12 个分区都能打开', settings_groups)
 
         def settings_search():
             open_settings()
@@ -469,8 +540,209 @@ def main():
             assert page.evaluate("document.documentElement.dataset.theme") == before
         run('在设置里切换深浅色并在刷新后保持', toggle_theme)
 
+
+        # ---------- 酒馆助手脚本 ----------
+        def script_vars(mid):
+            return page.evaluate("(id) => window.TavernHelper.getVariables({ type: 'message', message_id: id })", mid)
+
+        def script_row(name):
+            return page.locator('#right .script-row', has=page.locator('.script-name', has_text=name)).first
+
+        def js(expr):
+            return page.evaluate(expr)
+
+        def import_script_card():
+            # 前面的用例停在 Gemini 假模型上；换回 OpenAI 格式的那个，后面要核对请求体
+            page.locator('#composer-model').click()
+            page.locator('.menu button', has_text='mock-gpt').first.click()
+            page.wait_for_timeout(300)
+            page.locator('#left button', has_text='角色库').first.click()
+            page.wait_for_selector('#chat .home-wrap')
+            with page.expect_file_chooser() as fc:
+                page.locator('#chat .lib-head button', has_text='导入').click()
+            fc.value.set_files(SCRIPT_CARD)
+            page.wait_for_selector('#toasts .toast >> text=已导入角色「脚本测试卡」', timeout=10000)
+            tip = page.locator('#toasts .toast', has_text='已导入角色「脚本测试卡」').inner_text()
+            assert_in('世界书「脚本卡的书」已添加并绑定', tip, '导入提示')
+            assert_in('6 个脚本（5 个启用', tip, '导入提示')
+            assert_in('1 条正则', tip, '导入提示')
+            # 世界书真的进了世界书列表，并且绑在卡上
+            worlds = js("fetch('/api/worlds').then(r => r.json()).then(l => l.map(x => x.name))")
+            assert '脚本卡的书' in worlds, f'世界书列表里没有卡自带的那本：{worlds}'
+            page.wait_for_selector('#chat .mes[mesid="0"]', timeout=10000)
+            bound = js("window.TavernHelper.getCharWorldbookNames('current')")
+            assert bound['primary'] == '脚本卡的书', f'卡没绑上自带的世界书：{bound}'
+            # 脚本不用任何手动操作就跑起来了
+            page.wait_for_selector('#e2e-float', state='attached', timeout=15000)
+            page.wait_for_function("() => document.querySelector('#e2e-float').textContent.includes('好感度 10')", timeout=8000)
+            assert_in('脚本测试卡 · 共 1 楼', page.locator('#e2e-float').inner_text(), '悬浮窗')
+            assert page.locator('#e2e-parent-el').count() == 1, '脚本用 window.parent.document 建的元素不在'
+            page.wait_for_selector('#e2e-self-clean', state='attached', timeout=8000)
+            assert js('window.__e2eGlobal') == 'set-by-script', '脚本写到页面上的全局变量不在'
+            assert js('window.__e2eDisabled') is None, '卡里关着的脚本被运行了'
+            assert js("document.querySelectorAll('#lt-script-frames iframe').length") == 4, '应该有 4 个脚本在跑（MVU 加载脚本不单独运行，关着的不运行）'
+            page.wait_for_function("() => document.querySelectorAll('#script-buttons .script-btn').length === 2", timeout=5000)
+            assert [t.strip() for t in page.locator('#script-buttons .script-btn').all_inner_texts()] == ['打招呼', '问模型']
+            # 变量结构脚本：开场白的变量被它补上了默认值；状态栏占位符补在开场白后面并被卡里的正则换掉
+            page.wait_for_function("() => window.TavernHelper.getVariables({ type: 'message', message_id: 0 }).stat_data?.结构默认 === '已补'", timeout=8000)
+            v = script_vars(0)
+            assert v['stat_data']['好感度'] == 10 and v['stat_data']['地点'] == '门口', v
+            page.wait_for_function("() => document.querySelector('#chat .mes[mesid=\"0\"] .mes_text').innerText.includes('【状态栏占位】')", timeout=5000)
+            assert_in('<StatusPlaceHolderImpl/>', js("window.TavernHelper.getChatMessages(0)[0].message"), '开场白原文')
+            shot('16-script-card')
+        run('脚本：导入角色卡后世界书、正则、脚本自动就位并运行', import_script_card)
+
+        def script_events():
+            send('MVU 看看变量')
+            v = script_vars(-1)
+            st = v['stat_data']
+            assert st['好感度'] == 12, f'变量结构脚本应把好感度限制在 12：{st}'
+            assert st['地点'] == '图书馆', st
+            assert st['结构默认'] == '已补', st
+            assert st['脚本计数'] == 1, f'监听 mag_variable_update_ended 的脚本没生效：{st}'
+            assert 'display_data' not in v and 'delta_data' not in v, f'变量结构脚本去掉的字段又回来了：{list(v)}'
+            assert_in('【状态栏占位】', last_text(), '回复的状态栏')
+            assert_in('好感度 12', page.locator('#e2e-float').inner_text(), '悬浮窗')
+            # 脚本按钮 → 脚本建楼层、存自己的变量
+            n = mes_count()
+            page.locator('#script-buttons .script-btn', has_text='打招呼').click()
+            page.wait_for_function(f"() => document.querySelectorAll('#chat .mes').length === {n + 1}", timeout=5000)
+            assert_in('脚本打招呼第 1 次', last_text(), '脚本建的楼层')
+            page.locator('#script-buttons .script-btn', has_text='打招呼').click()
+            page.wait_for_function(f"() => document.querySelectorAll('#chat .mes').length === {n + 2}", timeout=5000)
+            assert_in('脚本打招呼第 2 次', last_text(), '脚本建的楼层')
+            page.wait_for_timeout(1200)  # 等角色卡防抖保存
+            saved = js("""fetch('/api/characters').then(r => r.json()).then(l => fetch('/api/characters/' + encodeURIComponent(l.find(c => c.name === '脚本测试卡').file)).then(r => r.json()))""")
+            flat = []
+            for t in saved['data']['extensions']['tavern_helper']['scripts']:
+                flat.extend(t['scripts'] if t.get('type') == 'folder' else [t])
+            fl = next(x for x in flat if x['id'] == 'e2e-float')
+            assert fl['data'] == {'clicks': 2}, f"脚本变量没存进卡里：{fl['data']}"
+            assert [b['name'] for b in fl['button']['buttons']] == ['打招呼', '问模型', '隐藏的'], fl['button']
+            # 脚本自己调模型（generateRaw）：不走预设，只发它指定的两条
+            page.locator('#script-buttons .script-btn', has_text='问模型').click()
+            page.wait_for_function("() => (document.querySelector('#e2e-float').dataset.gen ?? '').includes('脚本提问')", timeout=15000)
+            req = mock('/last')['body']['messages']
+            assert req == [{'role': 'system', 'content': '系统：脚本测试卡'}, {'role': 'user', 'content': '脚本提问'}], req
+            assert mes_count() == n + 2, '脚本的生成不应该写进聊天'
+            shot('17-script-events')
+        run('脚本：MVU 事件、变量结构、脚本按钮、脚本变量、脚本自己调模型', script_events)
+
+        def script_panel():
+            right_tab('脚本')
+            names = [t.strip() for t in page.locator('#right .script-row .script-name').all_inner_texts()]
+            assert names == ['MVU', '变量结构', '悬浮状态栏', '自己清理的脚本', '关着的脚本', '出错的脚本'], names
+            assert_in('轻酒馆已内置', script_row('MVU').inner_text(), 'MVU 行')
+            assert_in('运行中', script_row('悬浮状态栏').inner_text(), '悬浮状态栏行')
+            assert_in('文件夹「界面」', script_row('悬浮状态栏').inner_text(), '悬浮状态栏行')
+            assert_in('2 个按钮', script_row('悬浮状态栏').inner_text(), '悬浮状态栏行')
+            assert_in('未启用', script_row('关着的脚本').inner_text(), '关着的脚本行')
+            assert_in('故意出错', script_row('出错的脚本').inner_text(), '出错的脚本行')
+            shot('18-script-panel')
+            # 关掉一个脚本：它加到页面上的元素、写到页面上的全局变量、它的按钮都收走
+            script_row('悬浮状态栏').locator('.switch').click()
+            page.wait_for_function("() => !document.querySelector('#e2e-float')", timeout=5000)
+            assert page.locator('#e2e-parent-el').count() == 0, '用 window.parent.document.createElement 建的元素没收走'
+            assert js("'__e2eGlobal' in window") is False, '脚本写到页面上的全局变量没收走'
+            assert page.locator('#script-buttons').is_hidden(), '脚本停了按钮还在'
+            assert page.locator('#e2e-self-clean').count() == 1, '别的脚本不该受影响'
+            # 自己写了 pagehide 清理的脚本：停掉时它的清理代码会运行
+            script_row('自己清理的脚本').locator('.switch').click()
+            page.wait_for_function("() => !document.querySelector('#e2e-self-clean')", timeout=5000)
+            # 开关写回了卡里
+            page.wait_for_timeout(1200)
+            on = js("""fetch('/api/characters').then(r => r.json()).then(l => fetch('/api/characters/' + encodeURIComponent(l.find(c => c.name === '脚本测试卡').file)).then(r => r.json())).then(c => c.data.extensions.tavern_helper.scripts.find(t => t.type === 'folder').scripts.map(x => x.enabled))""")
+            assert on == [False, False], on
+            # 再打开：重新运行，按钮回来
+            script_row('悬浮状态栏').locator('.switch').click()
+            page.wait_for_selector('#e2e-float', state='attached', timeout=8000)
+            page.wait_for_function("() => document.querySelectorAll('#script-buttons .script-btn').length === 2", timeout=5000)
+            assert page.locator('#e2e-float').count() == 1 and page.locator('#e2e-parent-el').count() == 1, '重新打开后元素数量不对（可能重复了）'
+            # 这张卡的整体开关、总开关
+            page.locator('#right .card', has_text='角色卡「脚本测试卡」的脚本').locator('.card-title .switch').click()
+            page.wait_for_function("() => document.querySelectorAll('#lt-script-frames iframe').length === 0 && !document.querySelector('#e2e-float')", timeout=5000)
+            page.locator('#right .card', has_text='角色卡「脚本测试卡」的脚本').locator('.card-title .switch').click()
+            page.wait_for_selector('#e2e-float', state='attached', timeout=8000)
+            page.locator('#right .check', has_text='运行角色卡和预设自带的脚本').click()
+            page.wait_for_function("() => document.querySelectorAll('#lt-script-frames iframe').length === 0 && !document.querySelector('#e2e-float')", timeout=5000)
+            page.locator('#right .check', has_text='运行角色卡和预设自带的脚本').click()
+            page.wait_for_selector('#e2e-float', state='attached', timeout=8000)
+            # 换到别的角色：这张卡的脚本停掉；换回来再起
+            page.locator('#left .char-item', has_text='测试小林').first.click()
+            page.wait_for_function("() => !document.querySelector('#e2e-float') && !document.querySelector('#script-buttons .script-btn')", timeout=8000)
+            page.locator('#left .char-item', has_text='脚本测试卡').first.click()
+            page.wait_for_selector('#e2e-float', state='attached', timeout=8000)
+            page.wait_for_function("() => document.querySelector('#e2e-float').textContent.includes('脚本测试卡 · 共 5 楼')", timeout=8000)
+            assert js("document.querySelectorAll('#e2e-float').length") == 1
+            # 页面自己的配色没被脚本用的兼容样式带偏（选中项的底色还是原来那个变量）
+            active_bg = js("getComputedStyle(document.querySelector('#left .char-item.active')).backgroundColor")
+            assert active_bg.startswith(('rgba(31, 30, 29, 0.08', 'rgba(250, 249, 245, 0.09')), f'选中项底色变了：{active_bg}'
+            # 搜索能找到脚本面板
+            page.locator('#right .panel-search input').fill('小手机')
+            page.locator('#right .panel-result', has_text='酒馆助手脚本').first.click()
+            page.wait_for_timeout(300)
+            assert page.locator('#right .seg-tab.active').inner_text().strip() == '脚本'
+        run('脚本：面板里的状态和开关，停掉后把页面收拾干净，换角色跟着起停', script_panel)
+
+        def preset_scripts():
+            with open(SCRIPT_PRESET, encoding='utf-8') as f:
+                preset = f.read()
+            right_tab('导入')
+            with page.expect_file_chooser() as fc:
+                page.locator('#right button', has_text='选择文件').first.click()
+            fc.value.set_files(files=[{'name': '脚本预设.json', 'mimeType': 'application/json', 'buffer': preset.encode('utf-8')}])
+            page.wait_for_selector('#toasts .toast >> text=已导入预设「脚本预设」并切换过去', timeout=10000)
+            assert_in('2 个脚本（1 个启用）', page.locator('#toasts .toast', has_text='已导入预设「脚本预设」').inner_text(), '导入预设的提示')
+            page.wait_for_selector('#e2e-preset-script', state='attached', timeout=10000)
+            assert js('window.__e2ePresetOff') is None
+            idx = js('window.__e2eScriptIndex')
+            assert idx == ['e2e-mvu', 'e2e-schema', 'e2e-float', 'e2e-self', 'e2e-off', 'e2e-bad', 'e2e-preset-1', 'e2e-preset-off'], f'脚本看到的脚本列表不对：{idx}'
+            assert page.locator('#e2e-float').count() == 1, '换预设不该动角色卡的脚本'
+            # 预设脚本在发送前改请求、注入提示词
+            send('你好，预设脚本')
+            req = mock('/last')['body']['messages']
+            texts = [m['content'] for m in req]
+            assert texts[-1] == '预设脚本加的一句', texts[-3:]
+            assert any('注入的提示词' in t for t in texts), '脚本 injectPrompts 注入的提示词没进请求'
+            # 交给脚本的消息只有 role / content / name（带着内部字段的话，合并相邻消息的脚本会失灵）
+            assert texts[0] == '生成数据事件加的一句', f'脚本在 GENERATE_AFTER_DATA 里换掉的消息数组没生效，或看到了多余字段：{texts[0][:60]}'
+            assert texts[1].startswith('脚本预设的主提示词'), texts[1][:40]
+            # 脚本放进“扩展设置”的界面在脚本面板里能看到、能展开
+            right_tab('脚本')
+            assert_in('预设「脚本预设」的脚本（2 个）', page.locator('#right .panel-body').inner_text(), '脚本面板')
+            fold = page.locator('#right details', has_text='脚本自己的设置界面')
+            assert fold.locator('#e2e-preset-settings').count() == 1, '脚本的设置界面没出现在面板里'
+            assert not fold.locator('#e2e-preset-opt').is_visible()
+            fold.locator('.inline-drawer-toggle').click()
+            assert fold.locator('#e2e-preset-opt').is_visible(), '折叠抽屉点了没展开'
+            shot('19-preset-script')
+            # 切到别的分区再回来：设置界面还在（没有跟着面板重绘丢掉）
+            right_tab('正则')
+            assert js("!!document.querySelector('#lt-script-holder #e2e-preset-settings')"), '离开脚本面板后设置界面应该回到藏身处'
+            right_tab('脚本')
+            assert page.locator('#right #e2e-preset-settings').count() == 1
+            # 换回原来的预设：预设脚本停掉、它的东西收走
+            page.locator('#composer-preset').click()
+            page.locator('.menu button', has_text='默认').first.click()
+            page.wait_for_function("() => !document.querySelector('#e2e-preset-script') && !document.querySelector('#e2e-preset-settings')", timeout=8000)
+            assert page.locator('#e2e-float').count() == 1
+            send('再说一句')
+            texts = [m['content'] for m in mock('/last')['body']['messages']]
+            assert not any('预设脚本加的一句' in t or '注入的提示词' in t or '生成数据事件' in t for t in texts), '预设脚本停了它的改动还在生效'
+        run('脚本：预设自带的脚本随预设起停，能改请求、注入提示词、放自己的设置界面', preset_scripts)
+
+        def script_reload():
+            page.reload()
+            page.wait_for_selector('#chat .mes')
+            page.wait_for_selector('#e2e-float', state='attached', timeout=15000)
+            page.wait_for_function("() => document.querySelectorAll('#script-buttons .script-btn').length === 2", timeout=8000)
+            assert js("document.querySelectorAll('#lt-script-frames iframe').length") == 3, '刷新后应有 3 个脚本在跑（自己清理的那个已被关掉）'
+            page.wait_for_function("() => document.querySelector('#e2e-float').textContent.includes('脚本测试卡')", timeout=8000)
+        run('脚本：刷新页面后自动恢复运行', script_reload)
+
         def mobile():
             mctx = browser.new_context(viewport={'width': 390, 'height': 844}, is_mobile=True, has_touch=True, locale='zh-CN')
+            offline_cdn(mctx)
             mp = mctx.new_page()
             mp.on('pageerror', lambda e: errors.append(f'mobile pageerror: {e}'))
             mp.goto(BASE + '/')
@@ -491,6 +763,9 @@ def main():
             assert labels == ['菜单', '设置'], labels
             assert mp.locator('#composer-preset').is_visible(), '手机上看不到预设切换'
             assert mp.locator('#composer-model').is_visible()
+            # 脚本按钮在输入框上方，手机上也看得到、点得到
+            mp.wait_for_function("() => document.querySelectorAll('#script-buttons .script-btn').length === 2", timeout=10000)
+            assert mp.locator('#script-buttons .script-btn', has_text='打招呼').is_visible(), '手机上看不到脚本按钮'
             no_overflow('聊天页')
             mp.locator('#topbar button[title="菜单"]').click()
             mp.wait_for_timeout(400)
@@ -519,6 +794,151 @@ def main():
             mctx.close()
         run('手机布局（390px）', mobile)
 
+        # ---------- 与酒馆共用数据目录（另起的一个实例：--st-data 指向一个假的酒馆目录） ----------
+        if SHARED_URL and SHARED_DIR:
+            sctx = browser.new_context(viewport={'width': 1440, 'height': 900}, locale='zh-CN')
+            offline_cdn(sctx)
+            sp = sctx.new_page()
+            sp.on('console', lambda m: errors.append(f'[共用] console.{m.type}: {m.text}') if m.type in ('error',) else None)
+            sp.on('pageerror', lambda e: errors.append(f'[共用] pageerror: {e}'))
+            st_file = lambda *parts: os.path.join(SHARED_DIR, *parts)
+            chat_files = lambda: [os.path.join(r, f) for r, _, fs in os.walk(st_file('chats')) for f in fs if f.endswith('.jsonl')]
+
+            def shared_import_settings():
+                sp.goto(SHARED_URL + '/')
+                sp.wait_for_selector('#composer textarea', state='attached')
+                right_tab('导入', sp)
+                sp.wait_for_selector('#right >> text=与酒馆共用数据')
+                assert_in(SHARED_DIR, sp.locator('#right .panel-body').inner_text(), '导入面板')
+                sp.locator('#right button', has_text=SHARED_DIR).click()
+                sp.wait_for_selector('#right >> text=这就是正在共用的目录')
+                assert sp.locator('#right >> text=API 连接和 Key（1 个）').is_visible()
+                assert sp.locator('#right summary', has_text='角色卡').count() == 0, '共用目录不该再列角色卡让人导入'
+                sp.locator('#right button', has_text='开始导入').click()
+                sp.wait_for_selector('#right >> text=完成：连接 1')
+                right_tab('连接', sp)
+                sp.wait_for_selector('#right input[type=password][placeholder^="已保存"]')
+                assert sp.locator('#right .panel-body input.input').first.input_value() == '酒馆里的中转' or '酒馆里的中转' in sp.locator('#right .panel-body').inner_text()
+                # 酒馆自己的设置和密钥文件一个字都没被动过
+                assert json.load(open(st_file('settings.json'), encoding='utf-8'))['main_api'] == 'openai'
+                assert 'sk-from-tavern' in open(st_file('secrets.json'), encoding='utf-8').read()
+                sp.screenshot(path=os.path.join(SHOTS, '20-shared-import.png'))
+            run('共用：导入面板说明共用目录，只把连接和 Key 搬过来', shared_import_settings)
+
+            def shared_card_and_chat():
+                right_tab('导入', sp)
+                with sp.expect_file_chooser() as fc:
+                    sp.locator('#right button', has_text='选择文件').click()
+                fc.value.set_files(FIXTURE)
+                sp.wait_for_selector('#chat .mes')
+                cards = [f for f in os.listdir(st_file('characters')) if f.endswith('.png')]
+                assert len(cards) == 1, f'角色卡应该落在酒馆的 characters 里：{cards}'
+                assert len(os.listdir(st_file('worlds'))) == 1, '内嵌世界书应该落在酒馆的 worlds 里'
+                sp.fill('#send_textarea', '共用目录里的第一句')
+                sp.click('#send_but')
+                sp.wait_for_function("() => !document.querySelector('#send_but.stop')", timeout=40000)
+                sp.wait_for_timeout(900)
+                files = chat_files()
+                assert len(files) == 1, f'聊天应该落在酒馆的 chats 里：{files}'
+                lines = open(files[0], encoding='utf-8').read().strip().split('\n')
+                assert json.loads(lines[0])['chat_metadata'].get('integrity'), '共用模式下聊天头要带校验标记'
+                assert len(lines) >= 4, f'开场白 + 一问一答：{len(lines)} 行'
+                assert '共用目录里的第一句' in lines[2]
+            run('共用：导入的卡、世界书和新聊天都落在酒馆目录里，用搬过来的连接能聊', shared_card_and_chat)
+
+            def tavern_writes(text):
+                """装作酒馆那边又聊了一句：直接往聊天文件后面加一行"""
+                f = chat_files()[0]
+                with open(f, 'a', encoding='utf-8') as fh:
+                    fh.write(json.dumps({'name': '测试角色', 'is_user': False, 'mes': text, 'send_date': '2026-10-10T00:00:00.000Z'}, ensure_ascii=False) + '\n')
+                return f
+
+            def edit_first(text):
+                first = sp.locator('#chat .mes').first
+                first.hover()
+                first.locator('button[title="编辑"]').click()
+                sp.locator('#chat .mes-edit textarea').fill(text)
+                sp.locator('#chat .mes-edit button', has_text='保存').click()
+
+            def shared_conflict():
+                f = tavern_writes('酒馆那边回的一句')
+                edit_first('这边改的开场白')
+                sp.wait_for_selector('.modal >> text=这个聊天在别处被改过了')
+                sp.screenshot(path=os.path.join(SHOTS, '21-shared-conflict.png'))
+                assert '这边改的开场白' not in open(f, encoding='utf-8').read(), '被拦下来就不能写进去'
+                sp.locator('.modal-foot button', has_text='载入最新的').click()
+                sp.wait_for_function("() => document.querySelector('#chat')?.innerText.includes('酒馆那边回的一句')")
+                assert '这边改的开场白' not in sp.locator('#chat').inner_text(), '载入最新的之后这边没保存的修改应该作废'
+                # 载入之后拿到的是新版本号，正常修改能存进去
+                edit_first('载入之后再改')
+                sp.wait_for_timeout(1200)
+                assert sp.locator('.modal').count() == 0, '没有别处的改动时不该弹窗'
+                assert '载入之后再改' in open(f, encoding='utf-8').read()
+
+                # 再来一次，这回选覆盖
+                tavern_writes('酒馆那边的第二句')
+                edit_first('坚持用这边的')
+                sp.wait_for_selector('.modal >> text=这个聊天在别处被改过了')
+                sp.locator('.modal-foot button', has_text='用这边的覆盖').click()
+                sp.wait_for_function("() => !document.querySelector('.modal')")
+                sp.wait_for_timeout(600)
+                text = open(f, encoding='utf-8').read()
+                assert '坚持用这边的' in text and '酒馆那边的第二句' not in text, '覆盖后磁盘上应该是这边的内容'
+                backups = [os.path.join(r, x) for r, _, fs in os.walk(os.path.join(SHARED_OWN, 'backups')) for x in fs]
+                assert any('酒馆那边的第二句' in open(b, encoding='utf-8').read() for b in backups), '被覆盖的内容应该留在备份里'
+                # 关掉弹窗不选 = 先不管，下次保存再问
+                tavern_writes('第三句')
+                edit_first('先不管')
+                sp.wait_for_selector('.modal >> text=这个聊天在别处被改过了')
+                sp.keyboard.press('Escape')
+                sp.wait_for_function("() => !document.querySelector('.modal')")
+                assert '先不管' not in open(f, encoding='utf-8').read()
+                edit_first('再改一次')
+                sp.wait_for_selector('.modal >> text=这个聊天在别处被改过了')
+                sp.locator('.modal-foot button', has_text='用这边的覆盖').click()
+                sp.wait_for_function("() => !document.querySelector('.modal')")
+            run('共用：聊天被酒馆改过时拦下来问，载入最新 / 覆盖（留备份）/ 先不管都对', shared_conflict)
+
+            def shared_preset_conflict():
+                def temp_input():
+                    sp.locator('#right .panel-search input').fill('temperature')
+                    sp.locator('#right .panel-result', has_text='温度').first.click()
+                    sp.wait_for_timeout(300)
+                    return sp.locator('#right .flash input[type=number]').first
+                pf = st_file('OpenAI Settings', '默认.json')
+                assert os.path.exists(pf), '没有预设时新建的「默认」应该落在酒馆的 OpenAI Settings 里'
+                temp_input().fill('1.23')
+                sp.wait_for_timeout(1200)
+                assert json.load(open(pf, encoding='utf-8'))['temperature'] == 1.23
+                # 酒馆那边保存了这个预设
+                j = json.load(open(pf, encoding='utf-8'))
+                j['temperature'] = 0.42
+                j['酒馆那边加的'] = True
+                json.dump(j, open(pf, 'w', encoding='utf-8'), ensure_ascii=False)
+                temp_input().fill('1.5')
+                sp.wait_for_selector('.modal >> text=预设「默认」在别处被改过了')
+                assert json.load(open(pf, encoding='utf-8'))['temperature'] == 0.42, '被拦下来就不能写进去'
+                sp.locator('.modal-foot button', has_text='载入最新的').click()
+                sp.wait_for_function("() => !document.querySelector('.modal')")
+                sp.wait_for_timeout(300)
+                assert temp_input().input_value() == '0.42', '载入最新的之后应该显示酒馆那边的值'
+                temp_input().fill('0.9')
+                sp.wait_for_timeout(1200)
+                j = json.load(open(pf, encoding='utf-8'))
+                assert j['temperature'] == 0.9 and j['酒馆那边加的'] is True, '载入之后再改能存，酒馆加的字段还在'
+            run('共用：预设被酒馆改过时也拦下来问', shared_preset_conflict)
+
+            def stale_page_blocked():
+                # 没带前后端版本标记的保存请求（= 更新前就开着的旧页面）一律挡住，读不受影响
+                r = sp.evaluate("""async () => {
+                    const put = await fetch('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: '{"坏了":1}' });
+                    const get = await fetch('/api/settings');
+                    return { put: put.status, code: (await put.json()).error?.code, get: get.status, broken: '坏了' in (await get.json()) };
+                }""")
+                assert r == {'put': 409, 'code': 'stale-client', 'get': 200, 'broken': False}, r
+            run('旧页面的保存请求被挡住', stale_page_blocked)
+            sctx.close()
+
         browser.close()
 
     print('\n==== 结果 ====')
@@ -528,7 +948,9 @@ def main():
         if r[1] != 'OK':
             print(f'      {r[2]}')
     print(f'\n通过 {ok}/{len(results)}；截图在 {SHOTS}')
-    errors[:] = [e for e in errors if 'status of 429' not in e]  # 429 重试测试本来就会产生一条
+    # 本来就会有的几种：429 重试测试；脚本测试卡里故意出错的那个脚本；被掐掉的 jsdelivr 请求（图标字体）
+    # 共用那几项里的 409 是故意造出来的“聊天被别处改过”
+    errors[:] = [e for e in errors if 'status of 429' not in e and '故意出错' not in e and 'net::ERR_FAILED' not in e and not ('[共用]' in e and 'status of 409' in e)]
     if errors:
         print(f'\n浏览器报错 {len(errors)} 条：')
         for e in errors[:30]:

@@ -1,0 +1,73 @@
+/* 酒馆助手脚本往页面上加界面时会用到的酒馆主题变量和几个通用类名。只在有脚本运行时才加载。
+   变量都指到轻酒馆自己的配色上，深浅色跟着切。 */
+:root {
+    --SmartThemeBodyColor: var(--text);
+    --SmartThemeEmColor: var(--em);
+    --SmartThemeUnderlineColor: var(--text-2);
+    --SmartThemeQuoteColor: var(--quote);
+    --SmartThemeBlurTintColor: var(--surface);
+    --SmartThemeChatTintColor: var(--bg);
+    --SmartThemeUserMesBlurTintColor: var(--bubble);
+    --SmartThemeBotMesBlurTintColor: var(--bg);
+    --SmartThemeShadowColor: rgba(20, 20, 19, .2);
+    --SmartThemeBorderColor: var(--line-2);
+    --SmartThemeBlurStrength: 10px;
+    --mainFontSize: var(--mes-font);
+    --mainFontFamily: var(--font);
+    --monoFontFamily: var(--mono);
+    --fontScale: 1;
+    --black30a: rgba(0, 0, 0, .3);
+    --black50a: rgba(0, 0, 0, .5);
+    --black70a: rgba(0, 0, 0, .7);
+    --white30a: rgba(255, 255, 255, .3);
+    --white50a: rgba(255, 255, 255, .5);
+    --grey30: #4b4b4b;
+    --grey50: #7d7d7d;
+    --grey70: #b3b3b3;
+    /* 酒馆还有 --active / --warning 两个变量，这里故意不定义：--active 在轻酒馆里是“选中项的底色”，重名 */
+    --bottomFormBlockSize: 32px;
+    --topBarBlockSize: 44px;
+}
+
+.menu_button {
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    padding: 5px 12px; border: 1px solid var(--line-2); border-radius: 8px;
+    background: var(--surface); color: var(--text); font: inherit; font-size: 13px; line-height: 1.4;
+    cursor: pointer; user-select: none; white-space: nowrap;
+}
+.menu_button:hover { border-color: var(--line-3); background: var(--hover); }
+.menu_button.disabled, .menu_button[disabled] { opacity: .5; pointer-events: none; }
+.menu_button.menu_button_icon { padding: 5px 9px; }
+
+.text_pole, .st-ext-area select, .st-ext-area input[type="text"], .st-ext-area input[type="number"], .st-ext-area textarea {
+    width: 100%; box-sizing: border-box; padding: 6px 9px; border: 1px solid var(--line-2); border-radius: 8px;
+    background: var(--field); color: var(--text); font: inherit; font-size: 13px;
+}
+.checkbox_label { display: flex; align-items: center; gap: 7px; cursor: pointer; }
+.flex-container { display: flex; flex-wrap: wrap; gap: 5px; }
+.flexFlowColumn { flex-direction: column; }
+.flexNoGap { gap: 0; }
+.flexGap5 { gap: 5px; }
+.flexGap10 { gap: 10px; }
+.flex1 { flex: 1; }
+.alignitemscenter, .alignItemsCenter { align-items: center; }
+.justifyCenter { justify-content: center; }
+.justifySpaceBetween { justify-content: space-between; }
+.wide100p { width: 100%; }
+.margin0 { margin: 0; }
+.marginTop5 { margin-top: 5px; }
+.marginBot5 { margin-bottom: 5px; }
+.padding5 { padding: 5px; }
+.displayNone { display: none !important; }
+.opacity50p { opacity: .5; }
+.textAlignCenter { text-align: center; }
+.interactable { cursor: pointer; }
+.fa-fw { width: 1.25em; text-align: center; }
+
+/* 脚本的设置界面：酒馆的折叠抽屉 */
+.inline-drawer { border: 1px solid var(--line); border-radius: 10px; margin: 6px 0; background: var(--surface); }
+.inline-drawer-toggle { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 12px; cursor: pointer; font-weight: 600; font-size: 14px; }
+.inline-drawer-content { display: none; padding: 4px 12px 12px; font-size: 13px; }
+.inline-drawer-icon { color: var(--muted); }
+.st-ext-area { font-size: 13px; }
+.st-ext-area:empty { display: none; }
