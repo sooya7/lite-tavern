@@ -9,6 +9,7 @@ import { humanizedDate, sleep, uuid } from './core/util.js';
 import { estimateTokens } from './core/tokens.js';
 import { toast } from './ui/dom.js';
 import { broadcastEvent } from './ui/frontend.js';
+import { runGenerateInterceptors } from './ui/extensions.js';
 
 let ui = {};
 export function bindGenerateUI(fns) { ui = { ...ui, ...fns }; }
@@ -132,7 +133,12 @@ export async function generate(type = 'normal', opt = {}) {
     try {
         // 脚本用 injectPrompts 注入的提示词（在上面两个事件里注入的也算）
         await ui.beforePrompt?.(session, type);
-        prompt = await session.preparePrompt({ type, quietPrompt: opt.quietPrompt, excludeLast });
+        // 酒馆插件的生成拦截器（manifest.generate_interceptor）：拿到这次要发的聊天记录副本，可以临时改
+        let chatOverride;
+        const intercepted = await runGenerateInterceptors(session.chat, type === 'swipe' ? 'swipe' : (removedForRegen ? 'regenerate' : type));
+        if (intercepted?.aborted) throw new Error('插件中止了这次生成');
+        if (intercepted) chatOverride = intercepted.chat;
+        prompt = await session.preparePrompt({ type, quietPrompt: opt.quietPrompt, excludeLast, chatOverride });
         if (prompt.worldInfo?.activated?.length) await eventSource.emit(event_types.WORLD_INFO_ACTIVATED, prompt.worldInfo.activated);
         const evData = { chat: plainMessages(prompt.messages), dryRun: false, type };
         await eventSource.emit(event_types.CHAT_COMPLETION_PROMPT_READY, evData);

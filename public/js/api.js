@@ -1,6 +1,6 @@
 // 本地服务接口封装
 /** 和 server.mjs 的 CLIENT_PROTOCOL 对应：服务端升级后，还开着的旧页面再保存会被挡住并提示刷新 */
-const PROTOCOL = '2';
+export const PROTOCOL = '2';
 
 // 角色卡 / 预设 / 世界书的版本号：读的时候记下来，保存时自动带回去。
 // 磁盘上的已经不是这一版（酒馆那边或另一个窗口改过）就会保存失败：err.code === 'conflict'。

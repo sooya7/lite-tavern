@@ -403,7 +403,22 @@ function composerMenu(anchor) {
         { label: '继续写最后一条', icon: 'continue', onClick: () => generate('continue') },
         { label: '重新生成最后一条', icon: 'refresh', onClick: () => generate('regenerate') },
         { label: '代我写一条（扮演用户）', icon: 'mask', onClick: () => generate('impersonate') },
+        ...extensionMenuItems(),
     ]);
+}
+
+/** 酒馆插件放进“魔棒菜单”（#extensionsMenu）里的入口：轻酒馆把它们列在 + 菜单里，点了转给原来的元素 */
+function extensionMenuItems() {
+    const host = document.getElementById('extensionsMenu');
+    const items = [...(host?.children ?? [])]
+        .map(el => ({ el, label: (el.textContent || el.title || '').replace(/\s+/g, ' ').trim() }))
+        .filter(x => x.label)
+        .map(({ el, label }) => ({ label, icon: 'plug', onClick: () => {
+            // 有的插件听点击，有的（如柚月）只听按下 / 回车：两样都发，没人听的那样不起作用
+            el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+            (el.querySelector('.list-group-item, [role=button], button') ?? el).click();
+        } }));
+    return items.length ? ['-', ...items] : [];
 }
 
 export function setGenerating(on) {
