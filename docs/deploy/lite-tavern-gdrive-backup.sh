@@ -95,6 +95,13 @@ mv "$TMP" "$ARCHIVE"
 ( cd "$LOCAL_DIR" && sha256sum "$BASE" > "$BASE.sha256" )
 log "本地归档：$BASE，$(du -h "$ARCHIVE" | cut -f1)，$COUNT 个条目"
 
+# 本地只留最近几份；不管后面上传成不成都清，免得连着失败把盘占满
+mapfile -t OLD_LOCAL < <(ls -1 "$LOCAL_DIR"/${PREFIX}*.tar.gz 2>/dev/null | sort -r | tail -n +$((LOCAL_KEEP + 1)))
+for old in "${OLD_LOCAL[@]:-}"; do
+  [[ -z "$old" ]] && continue
+  rm -f "$old" "$old.sha256"
+done
+
 log "上传到 $REMOTE_ROOT"
 retry "${RCLONE[@]}" mkdir "$REMOTE_ROOT" || die "连不上 Google Drive"
 retry "${RCLONE[@]}" copyto "$ARCHIVE" "$REMOTE_ROOT/$BASE" --retries 3 --low-level-retries 10 \
@@ -117,12 +124,6 @@ for old in "${OLD_REMOTE[@]:-}"; do
   log "删掉云端旧备份 $old"
   "${RCLONE[@]}" deletefile "$REMOTE_ROOT/$old" || true
   "${RCLONE[@]}" deletefile "$REMOTE_ROOT/$old.sha256" 2>/dev/null || true
-done
-
-mapfile -t OLD_LOCAL < <(ls -1 "$LOCAL_DIR"/${PREFIX}*.tar.gz 2>/dev/null | sort -r | tail -n +$((LOCAL_KEEP + 1)))
-for old in "${OLD_LOCAL[@]:-}"; do
-  [[ -z "$old" ]] && continue
-  rm -f "$old" "$old.sha256"
 done
 
 log "完成：$REMOTE_ROOT/$BASE"
