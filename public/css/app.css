@@ -375,8 +375,9 @@ a { color: var(--accent); }
 .mes_text th, .mes_text td { border: 1px solid var(--line-2); padding: 5px 10px; }
 .mes_text th { background: var(--hover); font-weight: 600; }
 .mes_text hr { border: 0; border-top: 1px solid var(--line-2); margin: 1.2em 0; }
-.mes_text details { background: var(--hover); border-radius: 10px; padding: 6px 12px; margin: .6em 0; }
-.mes_text summary { cursor: pointer; color: var(--muted); }
+.mes_text details:not([style]):not([class]) { background: var(--hover); border-radius: 10px; padding: 6px 12px; margin: .6em 0; }
+.mes_text summary { cursor: pointer; }
+.mes_text details:not([style]):not([class]) > summary:not([style]):not([class]) { color: var(--muted); }
 .mes_text h1, .mes_text h2, .mes_text h3 { line-height: 1.35; margin: .9em 0 .45em; color: var(--text); font-weight: 600; }
 .mes_text h1 { font-size: 1.35em; } .mes_text h2 { font-size: 1.2em; } .mes_text h3 { font-size: 1.07em; }
 .mes_text ul, .mes_text ol { padding-left: 1.5em; margin: .4em 0 .85em; }
@@ -403,13 +404,13 @@ a { color: var(--accent); }
 .mes-edit { width: 100%; }
 .mes-edit .textarea { min-height: 120px; font-size: 15px; border-radius: 14px; padding: 12px 14px; background: var(--field); }
 .mes-edit .row { margin-top: 8px; justify-content: flex-end; }
-.frontend-frame { width: 100%; border: 0; display: block; background: transparent; border-radius: 10px; min-height: 20px; color-scheme: normal; }
+.frontend-frame { width: 100%; border: 0; display: block; background: transparent; min-height: 20px; color-scheme: normal; }
 .frontend-wrap { margin: .6em 0; }
 .mes .mes_text > .frontend-wrap:first-child { margin-top: 0; }
 .ejs-error { color: var(--danger); font-size: 12px; }
 .load-earlier { text-align: center; padding: 4px 0 20px; }
 .scroll-btns {
-    position: absolute; left: 50%; transform: translateX(-50%); bottom: 132px; z-index: 5;
+    position: absolute; left: 50%; transform: translateX(-50%); bottom: calc(var(--composer-h, 120px) + 10px); z-index: 5;
     display: flex; gap: 10px; pointer-events: none;
 }
 .scroll-btn {
@@ -472,6 +473,17 @@ a { color: var(--accent); }
     .chat { padding: 8px 16px 32px; }
     .mes.user .mes_block { max-width: 88%; }
     .composer-note { display: none; }
+    /* 空着、没在打字时收成一行：＋、预设（只留图标）、输入框、发送。点进输入框再展开成两行（预设名、连接都回来） */
+    .composer-box.compact { display: flex; align-items: center; gap: 2px; padding: 6px 8px 6px 6px; }
+    .composer-box.compact > .composer-bar { display: contents; }
+    .composer-box.compact > textarea { order: 2; flex: 1 1 0; width: auto; min-width: 0; padding: 2px 4px; }
+    .composer-box.compact .tool { order: 0; flex: none; }
+    .composer-box.compact .chip.preset { order: 1; flex: none; padding: 0 7px; }
+    .composer-box.compact .chip.preset > .chip-t { display: none; }
+    .composer-box.compact .chip.model, .composer-box.compact .composer-bar > .grow { display: none; }
+    .composer-box.compact .send-btn { order: 3; flex: none; }
+    /* 窄屏上滚动按钮靠右：居中会盖住最后一楼底下那排操作图标 */
+    .scroll-btns { left: auto; right: 12px; transform: none; flex-direction: column; gap: 8px; }
 }
 
 /* ---------- 右侧设置面板：左边 4 个分组，顶上搜索 + 当前分组的分区，下面是内容 ---------- */
@@ -725,10 +737,10 @@ a { color: var(--accent); }
 #lt-script-frames { position: absolute; width: 0; height: 0; overflow: hidden; pointer-events: none; }
 .lt-script-frame { width: 0; height: 0; border: 0; position: absolute; visibility: hidden; }
 /* 输入框上方的脚本按钮：一行放不下就横向滑 */
-.script-buttons { max-width: var(--chat-width); margin: 0 auto 8px; padding: 0 2px; display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; }
+.script-buttons { max-width: var(--chat-width); margin: 0 auto 6px; padding: 0 2px; display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; }
 .script-buttons::-webkit-scrollbar { display: none; }
 .script-buttons[hidden] { display: none; }
-.script-btn { flex: none; padding: 5px 12px; border: 1px solid var(--line-2); border-radius: 999px; background: var(--surface); color: var(--text-2); font: inherit; font-size: 13px; line-height: 1.4; cursor: pointer; white-space: nowrap; }
+.script-btn { flex: none; padding: 4px 11px; border: 1px solid var(--line-2); border-radius: 999px; background: var(--surface); color: var(--text-2); font: inherit; font-size: 12.5px; line-height: 1.4; cursor: pointer; white-space: nowrap; }
 .script-btn:hover { border-color: var(--line-3); color: var(--text); }
 .center.home .script-buttons { display: none; }
 /* 设置 › 角色 › 脚本 */

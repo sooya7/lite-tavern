@@ -1125,12 +1125,37 @@ def main():
             # 手机上没有悬停提示：顶栏两个按钮带文字，输入框上能看到当前预设
             labels = [t.strip() for t in mp.locator('#topbar .tb-btn').all_inner_texts()]
             assert labels == ['菜单', '设置'], labels
+            # 输入框空着时收成一行：＋、预设（只留图标）、输入框、发送；点进输入框展开，预设名和连接都回来
             assert mp.locator('#composer-preset').is_visible(), '手机上看不到预设切换'
-            assert mp.locator('#composer-model').is_visible()
+            box_h = lambda: mp.evaluate("document.querySelector('.composer-box').getBoundingClientRect().height")
+            idle_h = box_h()
+            assert idle_h < 60, f'输入框空着时没有收成一行（高 {idle_h}）'
+            assert not mp.locator('#composer-model').is_visible(), '收成一行时不该显示连接标签'
+            mp.locator('#composer-preset').tap()
+            mp.wait_for_selector('.menu', timeout=3000)
+            assert box_h() == idle_h, '收起状态下点预设图标，输入框不该跟着变形'
+            mp.mouse.click(195, 200)
+            mp.wait_for_timeout(600)
+            mp.locator('#send_textarea').tap()
+            mp.wait_for_timeout(300)
+            assert mp.locator('#composer-model').is_visible() and mp.locator('#composer-preset .chip-t').is_visible(), '点进输入框后没有展开'
+            mp.locator('#composer-model').tap()
+            mp.wait_for_selector('.menu', timeout=3000)
+            mp.wait_for_timeout(500)
+            assert mp.locator('#composer-model').is_visible(), '展开状态下点连接标签，菜单开着时输入框不该收回去'
+            mp.mouse.click(195, 200)
+            mp.wait_for_timeout(900)
+            assert box_h() == idle_h, '菜单关掉、输入框空着，应该收回一行'
             # 脚本按钮在输入框上方，手机上也看得到、点得到
             mp.wait_for_function("() => document.querySelectorAll('#script-buttons .script-btn').length === 2", timeout=10000)
             assert mp.locator('#script-buttons .script-btn', has_text='打招呼').is_visible(), '手机上看不到脚本按钮'
             no_overflow('聊天页')
+            # 卡片 / 预设自己排过版的折叠块不加灰底；滚动按钮不压在脚本按钮上
+            styled_bg = mp.evaluate('''() => { const d = document.createElement('details'); d.setAttribute('style', 'display:inline-block');
+                document.querySelector('#chat .mes_text').append(d); const bg = getComputedStyle(d).backgroundColor; d.remove(); return bg; }''')
+            assert styled_bg in ('rgba(0, 0, 0, 0)', 'transparent'), f'带样式的折叠块被加了底色：{styled_bg}'
+            gap = mp.evaluate('''() => { const b = document.querySelector('.scroll-btns').getBoundingClientRect(); const s = document.getElementById('script-buttons').getBoundingClientRect(); return s.top - b.bottom; }''')
+            assert gap >= 0, f'滚动按钮压在脚本按钮上（差 {gap}px）'
             mp.locator('#topbar button[title="菜单"]').click()
             mp.wait_for_timeout(400)
             mp.screenshot(path=os.path.join(SHOTS, '12-mobile-left.png'))

@@ -248,6 +248,13 @@ export function initScrollTracking() {
         s.scrollTo({ top: s.scrollTop + cur.offset - 8, behavior: 'smooth' });
     } }, icon('arrowUp'));
     $('#center').append(h('div', { class: 'scroll-btns' }, up, down));
+    // 输入区有多高按钮就垫多高（上面多出脚本按钮、状态行，或者输入框收成一行时都跟着变）
+    const composer = $('#composer');
+    if (composer && typeof ResizeObserver === 'function') {
+        const setH = () => $('#center').style.setProperty('--composer-h', `${composer.offsetHeight}px`);
+        new ResizeObserver(setH).observe(composer);
+        setH();
+    }
     let raf = 0;
     const update = () => {
         raf = 0;
@@ -325,6 +332,22 @@ function messageMenu(anchor, i) {
 
 // ---------- 输入区 ----------
 let textarea;
+let compactTimer = 0;
+/** 输入框空着、没在打字、也没开着菜单：收成一行。只是加一个类名，样式只在窄屏上生效 */
+function syncCompact() {
+    clearTimeout(compactTimer);
+    const box = textarea?.closest('.composer-box');
+    if (!box) return;
+    const compact = !textarea.value && document.activeElement !== textarea && !document.querySelector('.menu');
+    if (compact === box.classList.contains('compact')) return;
+    box.classList.toggle('compact', compact);
+    if (compact) textarea.style.height = '';
+}
+/** 晚一点再判断：点预设 / 连接标签时输入框先失焦，等那一下点击落完（菜单开出来）再决定收不收 */
+function syncCompactSoon(ms = 250) {
+    clearTimeout(compactTimer);
+    compactTimer = setTimeout(syncCompact, ms);
+}
 export function renderComposer() {
     const root = $('#composer');
     clear(root);
@@ -345,11 +368,14 @@ export function renderComposer() {
         h('div', { id: 'mes_stop', onclick: () => stopGeneration() }),
         h('div', { id: 'option_regenerate', onclick: () => generate('regenerate') }),
         h('div', { id: 'option_continue', onclick: () => generate('continue') }));
-    const box = h('div', { class: 'composer-box' }, textarea, bar, compat);
+    const box = h('div', { class: 'composer-box compact' }, textarea, bar, compat);
     box.addEventListener('mousedown', (e) => { if (e.target === box) { e.preventDefault(); textarea.focus(); } });
     root.append(status, box);
     const fit = () => { textarea.style.height = 'auto'; textarea.style.height = `${Math.min(textarea.scrollHeight, window.innerHeight * 0.4)}px`; };
     textarea.addEventListener('input', fit);
+    textarea.addEventListener('input', syncCompact);
+    textarea.addEventListener('focus', syncCompact);
+    textarea.addEventListener('blur', () => syncCompactSoon());
     textarea.addEventListener('keydown', (e) => {
         const mobile = matchMedia('(pointer: coarse)').matches;
         if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && state.settings.ui.enterToSend && !mobile) {
@@ -359,6 +385,8 @@ export function renderComposer() {
     });
     updateComposerChips();
     if (!chipsHooked) {
+        // 菜单关掉之后（点了菜单项或点了别处）再看一次要不要收回一行
+        document.addEventListener('click', () => syncCompactSoon(300));
         // 连接 / 预设面板里的改动（改模型名、切连接、换预设）都会冒泡到 #right，统一刷新标签
         chipsHooked = true;
         let raf = 0;
@@ -421,6 +449,7 @@ function onSend() {
     const text = textarea.value;
     textarea.value = '';
     textarea.style.height = 'auto';
+    syncCompactSoon();
     generate('normal', { input: text });
 }
 
