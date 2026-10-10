@@ -111,7 +111,7 @@ docs/HANDOFF.md         本文档
 - 假的父页面还补了 `SillyTavern`、`TavernHelper`、`document.defaultView`、`CustomEvent` 等构造器；沙箱里的 `SillyTavern.getContext()` 补了 `getCurrentChatId`（= 聊天文件名，和页面上的一致）、`substituteParams` 等
 - 快照里首楼和界面所在的楼带全部 swipe 的原文（`swipes`），`getChatMessages(…, {include_swipes: true})` 返回酒馆助手的形状；其余楼只有当前版本（长聊天每楼都带的话快照太大）。`swipes_data` 只有当前版本那一格有变量
 - **改了 `frontend-runtime.js` 一定要改 `ui/frontend.js` 里的 `RT_V`**（运行时是长缓存的），这次从 h12 一路没改，补到 h30
-- 测试卡 `tools/fixtures/opening-card.json`，端到端“前端卡：界面在页面上发事件叫卡自带的脚本干活”。**没有拿用户那张真卡在 117 上点过**（会改他的聊天），只按它的代码写了同样流程的复现
+- 测试卡 `tools/fixtures/opening-card.json`，端到端“前端卡：界面在页面上发事件叫卡自带的脚本干活”。117 上拿用户那张真卡做过只读体检（无头浏览器打开他现有的聊天）：界面拿到的聊天名和页面一致、首楼 5 个开场都在、选版本能进到选身份那一步；再用一个故意不合格的包（`chatId: null`）发 `hc1:opening-confirm`，卡自带的小手机脚本接住并按它自己的规则拒绝（“聊天已切换”），聊天没被改动。**真正的“检票”没替用户点**（那会替他选开场）
 
 ### 聊天和角色卡的流量（2026-10-10）
 
