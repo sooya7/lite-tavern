@@ -23,7 +23,10 @@
     --ok: #3f7d4e;
     --warn: #9a6a12;
     --danger: #b5372b;
-    --quote: #a4512f;
+    --quote: #4d76a6;         /* 对话：柔和的蓝 */
+    --read: #33322e;          /* 角色正文：比纯黑柔一点 */
+    --backdrop: #e9e6dc;      /* 窄屏聊天页：纸后面的底色 */
+    --paper: #fbfaf6;         /* 窄屏聊天页：正文那张纸 */
     --em: #6b6a64;
     --code-bg: #f0eee6;
     --scrim: rgba(20, 20, 19, .32);
@@ -33,10 +36,10 @@
     --shadow: 0 12px 40px rgba(20, 20, 19, .14), 0 2px 8px rgba(20, 20, 19, .06);
     --radius: 12px;
     --radius-sm: 8px;
-    /* 西文衬线 + 中文衬线；没有中文衬线字体的系统会落到雅黑/苹方，避免宋体发虚 */
-    --font-read: "Tiempos Text", "Source Serif 4", "Source Serif Pro", Charter, Georgia, "Noto Serif SC", "Source Han Serif SC", "Songti SC", "PingFang SC", "Microsoft YaHei", serif, "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji";
-    /* 界面和正文统一用同一套字体 */
-    --font: var(--font-read);
+    /* 界面和正文统一用系统无衬线（2026-10-10 晚用户对比 Luker 后要求从宋体换回来）。
+       中文字体排在前面：引号、省略号、破折号按中文的宽度画，数字和英文也出自同一套字体，不会一屏两种字 */
+    --font: "PingFang SC", -apple-system, BlinkMacSystemFont, "HarmonyOS Sans SC", "MiSans", "Microsoft YaHei", "Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC", system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji";
+    --font-read: var(--font);
     --mono: ui-monospace, "SF Mono", "Cascadia Code", Consolas, "Sarasa Mono SC", monospace;
     --chat-width: 780px;
     --mes-font: 16px;
@@ -68,7 +71,10 @@
     --ok: #8fbf8f;
     --warn: #e0b45c;
     --danger: #e5776b;
-    --quote: #e9a584;
+    --quote: #9dbbe0;
+    --read: #e6e4da;
+    --backdrop: #1c1c1a;
+    --paper: #292927;
     --em: #b6b4ab;
     --code-bg: #1f1e1d;
     --scrim: rgba(0, 0, 0, .5);
@@ -327,7 +333,7 @@ a { color: var(--accent); }
 .mes_name { font-weight: 600; font-size: 14px; color: var(--text); }
 .mes_time { font-size: 12px; color: var(--faint); }
 .mes_id { font-size: 11.5px; color: var(--faint); font-family: var(--mono); }
-.mes.char .mes_text { color: var(--text); }
+.mes.char .mes_text { color: var(--read); }
 
 /* 用户：右侧气泡 */
 .mes.user { display: flex; flex-direction: column; align-items: flex-end; }
@@ -335,7 +341,7 @@ a { color: var(--accent); }
 .mes_bubble {
     background: var(--bubble); border-radius: 18px; padding: 10px 16px; max-width: 100%; min-width: 0;
 }
-.mes.user .mes_text { font-size: calc(var(--mes-font) - .5px); line-height: 1.65; }
+.mes.user .mes_text { font-size: calc(var(--mes-font) - .5px); line-height: 1.55; }
 .mes.user.editing .mes_block { max-width: 100%; width: 100%; }
 .mes.user.editing .mes_bubble { width: 100%; background: transparent; padding: 0; }
 
@@ -354,10 +360,10 @@ a { color: var(--accent); }
 .swipes > span { min-width: 30px; text-align: center; }
 
 .mes_text {
-    font-size: var(--mes-font); line-height: 1.78; color: var(--text-2);
+    font-size: var(--mes-font); line-height: 1.62; color: var(--text-2);
     overflow-wrap: anywhere; word-break: normal;
 }
-.mes_text p { margin: 0 0 .85em; }
+.mes_text p { margin: 0 0 1.4em; }
 .mes_text p:last-child { margin-bottom: 0; }
 .mes_text em, .mes_text i { color: var(--em); }
 .mes_text strong, .mes_text b { color: var(--text); font-weight: 650; }
@@ -414,7 +420,7 @@ a { color: var(--accent); }
     display: flex; gap: 10px; pointer-events: none;
 }
 .scroll-btn {
-    pointer-events: auto; width: 34px; height: 34px; border-radius: 50%; background: var(--surface); border: 1px solid var(--line-2);
+    pointer-events: auto; width: 34px; height: 34px; border-radius: 50%; background: color-mix(in srgb, var(--surface) 88%, transparent); border: 1px solid var(--line-2);
     display: flex; align-items: center; justify-content: center; cursor: pointer; box-shadow: var(--shadow-box-focus); color: var(--text-2);
 }
 .scroll-btn[hidden] { display: none; }
@@ -435,12 +441,13 @@ a { color: var(--accent); }
 }
 .composer-box:hover { border-color: var(--line-3); }
 .composer-box:focus-within { border-color: var(--line-3); box-shadow: var(--shadow-box-focus); }
+.composer-row { display: flex; align-items: flex-end; gap: 8px; cursor: text; }
 .composer textarea {
-    display: block; width: 100%; resize: none; max-height: 40vh; min-height: 26px; padding: 2px 2px 6px;
+    display: block; flex: 1 1 0; width: auto; min-width: 0; resize: none; max-height: 40vh; min-height: 32px; padding: 4px 2px;
     border: 0; outline: none; background: transparent; line-height: 1.55; font-size: 16px;
 }
 .composer textarea::placeholder { color: var(--faint); }
-.composer-bar { display: flex; align-items: center; gap: 4px; margin-left: -6px; }
+.composer-bar { display: flex; align-items: center; gap: 4px; margin: 4px 0 0 -6px; }
 .composer-bar .tool { width: 32px; height: 32px; border-radius: 8px; border: 1px solid var(--line-2); color: var(--muted); }
 .composer-bar .tool:hover { border-color: var(--line-3); }
 .chip {
@@ -453,7 +460,7 @@ a { color: var(--accent); }
 .chip .ic svg { width: 15px; height: 15px; }
 .chip.model { color: var(--text-2); }
 .send-btn {
-    width: 32px; height: 32px; border-radius: 8px; border: 0; margin-left: 4px;
+    width: 32px; height: 32px; border-radius: 8px; border: 0; flex: none;
     background: var(--accent); color: #fff; transition: background .15s, opacity .15s;
 }
 .send-btn:hover { background: color-mix(in srgb, var(--accent) 86%, #000); color: #fff; }
@@ -473,17 +480,19 @@ a { color: var(--accent); }
     .chat { padding: 8px 16px 32px; }
     .mes.user .mes_block { max-width: 88%; }
     .composer-note { display: none; }
-    /* 空着、没在打字时收成一行：＋、预设（只留图标）、输入框、发送。点进输入框再展开成两行（预设名、连接都回来） */
-    .composer-box.compact { display: flex; align-items: center; gap: 2px; padding: 6px 8px 6px 6px; }
-    .composer-box.compact > .composer-bar { display: contents; }
-    .composer-box.compact > textarea { order: 2; flex: 1 1 0; width: auto; min-width: 0; padding: 2px 4px; }
-    .composer-box.compact .tool { order: 0; flex: none; }
-    .composer-box.compact .chip.preset { order: 1; flex: none; padding: 0 7px; }
-    .composer-box.compact .chip.preset > .chip-t { display: none; }
-    .composer-box.compact .chip.model, .composer-box.compact .composer-bar > .grow { display: none; }
-    .composer-box.compact .send-btn { order: 3; flex: none; }
+    /* 聊天页：正文放在一张“纸”上，两边露出一条深一点的底色，字不再从屏幕左边铺到右边 */
+    /* 手机上滚动条是浮在内容上的，不用预留位置（留了会让左右留白不对称） */
+    .chat-scroll { scrollbar-gutter: auto; }
+    .center:not(.home) .chat-scroll { background: var(--backdrop); }
+    .center:not(.home) .chat {
+        margin: 0 7px 10px; padding: 14px 19px 16px; min-height: calc(100% - 10px); box-sizing: border-box;
+        background: var(--paper); border-radius: 0 0 16px 16px; box-shadow: 0 1px 2px rgba(20, 20, 19, .06);
+    }
+    .center:not(.home) .chat > .mes:last-child { margin-bottom: 0; }
+    .center:not(.home) .composer { background: var(--backdrop); }
+    .center:not(.home) .composer::before { display: none; }
     /* 窄屏上滚动按钮靠右：居中会盖住最后一楼底下那排操作图标 */
-    .scroll-btns { left: auto; right: 12px; transform: none; flex-direction: column; gap: 8px; }
+    .scroll-btns { left: auto; right: 14px; transform: none; flex-direction: column; gap: 8px; }
 }
 
 /* ---------- 右侧设置面板：左边 4 个分组，顶上搜索 + 当前分组的分区，下面是内容 ---------- */

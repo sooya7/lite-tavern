@@ -256,12 +256,17 @@ export function initScrollTracking() {
         setH();
     }
     let raf = 0;
+    let lastTop = s.scrollTop, goingUp = false;
     const update = () => {
         raf = 0;
         const atBottom = s.scrollHeight - s.scrollTop - s.clientHeight < 80;
         stickToBottom = atBottom;
-        down.hidden = atBottom;
-        up.hidden = !readingMessage(s);
+        // 只在往回翻的时候露出来：往下读、或者生成时跟着滚到底，按钮都收起，不挡正文
+        if (s.scrollTop < lastTop - 4) goingUp = true;
+        else if (s.scrollTop > lastTop + 4) goingUp = false;
+        lastTop = s.scrollTop;
+        down.hidden = atBottom || !goingUp;
+        up.hidden = !goingUp || !readingMessage(s);
     };
     s.addEventListener('scroll', () => { if (!raf) raf = requestAnimationFrame(update); }, { passive: true });
 }
@@ -332,22 +337,6 @@ function messageMenu(anchor, i) {
 
 // ---------- 输入区 ----------
 let textarea;
-let compactTimer = 0;
-/** 输入框空着、没在打字、也没开着菜单：收成一行。只是加一个类名，样式只在窄屏上生效 */
-function syncCompact() {
-    clearTimeout(compactTimer);
-    const box = textarea?.closest('.composer-box');
-    if (!box) return;
-    const compact = !textarea.value && document.activeElement !== textarea && !document.querySelector('.menu');
-    if (compact === box.classList.contains('compact')) return;
-    box.classList.toggle('compact', compact);
-    if (compact) textarea.style.height = '';
-}
-/** 晚一点再判断：点预设 / 连接标签时输入框先失焦，等那一下点击落完（菜单开出来）再决定收不收 */
-function syncCompactSoon(ms = 250) {
-    clearTimeout(compactTimer);
-    compactTimer = setTimeout(syncCompact, ms);
-}
 export function renderComposer() {
     const root = $('#composer');
     clear(root);
@@ -360,22 +349,20 @@ export function renderComposer() {
         moreBtn,
         h('button', { class: 'chip preset', type: 'button', id: 'composer-preset', title: '切换预设', onclick: (e) => presetMenu(e.currentTarget) }),
         h('div', { class: 'grow' }),
-        h('button', { class: 'chip model', type: 'button', id: 'composer-model', title: '切换连接', onclick: (e) => connectionMenu(e.currentTarget) }),
-        sendBtn);
+        h('button', { class: 'chip model', type: 'button', id: 'composer-model', title: '切换连接', onclick: (e) => connectionMenu(e.currentTarget) }));
+    // 上半区：输入框 + 发送键（2026-10-10 用户要求发送键放在上面）
+    const row = h('div', { class: 'composer-row' }, textarea, sendBtn);
     // 酒馆页面上的几个按钮 id，角色卡脚本会用 $('#mes_stop').click() 这类写法触发停止 / 重新生成 / 继续。
     // 这里放几个看不见的同名元素接住，功能还是走上面那一套（界面上不多出入口）
     const compat = h('div', { hidden: true, 'aria-hidden': 'true' },
         h('div', { id: 'mes_stop', onclick: () => stopGeneration() }),
         h('div', { id: 'option_regenerate', onclick: () => generate('regenerate') }),
         h('div', { id: 'option_continue', onclick: () => generate('continue') }));
-    const box = h('div', { class: 'composer-box compact' }, textarea, bar, compat);
-    box.addEventListener('mousedown', (e) => { if (e.target === box) { e.preventDefault(); textarea.focus(); } });
+    const box = h('div', { class: 'composer-box' }, row, bar, compat);
+    box.addEventListener('mousedown', (e) => { if (e.target === box || e.target === row) { e.preventDefault(); textarea.focus(); } });
     root.append(status, box);
     const fit = () => { textarea.style.height = 'auto'; textarea.style.height = `${Math.min(textarea.scrollHeight, window.innerHeight * 0.4)}px`; };
     textarea.addEventListener('input', fit);
-    textarea.addEventListener('input', syncCompact);
-    textarea.addEventListener('focus', syncCompact);
-    textarea.addEventListener('blur', () => syncCompactSoon());
     textarea.addEventListener('keydown', (e) => {
         const mobile = matchMedia('(pointer: coarse)').matches;
         if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && state.settings.ui.enterToSend && !mobile) {
@@ -385,8 +372,6 @@ export function renderComposer() {
     });
     updateComposerChips();
     if (!chipsHooked) {
-        // 菜单关掉之后（点了菜单项或点了别处）再看一次要不要收回一行
-        document.addEventListener('click', () => syncCompactSoon(300));
         // 连接 / 预设面板里的改动（改模型名、切连接、换预设）都会冒泡到 #right，统一刷新标签
         chipsHooked = true;
         let raf = 0;
@@ -449,7 +434,6 @@ function onSend() {
     const text = textarea.value;
     textarea.value = '';
     textarea.style.height = 'auto';
-    syncCompactSoon();
     generate('normal', { input: text });
 }
 
