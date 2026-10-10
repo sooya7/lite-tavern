@@ -13,6 +13,9 @@ import { parseChatJsonl, serializeChat, addSwipe, setSwipe } from '../public/js/
 import { VariableManager } from '../public/js/core/vars.js';
 import { extractFrontends } from '../public/js/ui/render.js';
 import { decodeScaled, encodePng, makeThumbnail } from '../server/thumb.mjs';
+import fs from 'node:fs';
+import { GROUPS, TAB_LABELS, groupOf, pathOf } from '../public/js/ui/panels/nav.js';
+import { FEATURES, searchFeatures } from '../public/js/ui/panels/search.js';
 
 const engine = new MacroEngine();
 const env = (over = {}) => {
@@ -251,4 +254,37 @@ test('缩略图：PNG 解码、按块平均缩小、重新编码', () => {
     const thumb = makeThumbnail(Buffer.from(card), 10);
     assert.ok(thumb.length < card.length);
     assert.ok(!Buffer.from(thumb).includes(Buffer.from('tEXt')));
+});
+
+test('设置面板：4 个分组盖住 11 个分区，搜索清单和面板上的字对得上', () => {
+    const tabs = GROUPS.flatMap(g => g.tabs);
+    assert.equal(GROUPS.length, 4);
+    assert.equal(tabs.length, 11);
+    assert.equal(new Set(tabs).size, 11, '一个分区只属于一个分组');
+    assert.deepEqual([...tabs].sort(), Object.keys(TAB_LABELS).sort());
+    for (const g of GROUPS) assert.ok(g.tabs.length >= 2 && g.tabs.length <= 3, `${g.label} 的分区数`);
+    assert.equal(groupOf('vars').id, 'chat');
+    assert.equal(pathOf('preset'), '模型 › 预设');
+
+    const src = (id) => fs.readFileSync(new URL(`../public/js/ui/panels/${id}.js`, import.meta.url), 'utf8');
+    for (const f of FEATURES) {
+        if (f.action) continue;
+        assert.ok(tabs.includes(f.tab), `${f.t} 指向不存在的分区 ${f.tab}`);
+        // 定位文字必须真的出现在那个分区的源码里：面板上的字改了，这里会提醒同步清单
+        for (const one of [].concat(f.find ?? [])) assert.ok(src(f.tab).includes(one), `${f.t}：${f.tab}.js 里找不到「${one}」`);
+    }
+    assert.equal(new Set(FEATURES.map(f => f.t)).size, FEATURES.length, '功能名不重复');
+
+    const path = (f) => (f.tab ? pathOf(f.tab) : '');
+    assert.equal(searchFeatures('字体大小', path)[0].t, '正文字号');
+    assert.equal(searchFeatures('Temperature', path)[0].t, '温度');
+    assert.equal(searchFeatures('深色', path)[0].tab, 'settings');
+    assert.equal(searchFeatures('开场白', path)[0].tab, 'char');
+    assert.equal(searchFeatures('新聊天', path)[0].action, 'newChat');
+    assert.ok(searchFeatures('世界书', path).length >= 4, '“世界书”应该同时找到全局、角色、聊天几处');
+    assert.ok(searchFeatures('本聊天', path).every(f => groupOf(f.tab).id === 'chat'), '分组名也能搜');
+    assert.ok(searchFeatures('预设 导入', path).some(f => f.t === '导入预设'), '多个词都要命中');
+    assert.deepEqual(searchFeatures('   ', path), []);
+    assert.deepEqual(searchFeatures('这个功能不存在', path), []);
+    assert.ok(searchFeatures('a', path).length <= 8);
 });

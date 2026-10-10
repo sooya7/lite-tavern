@@ -5,7 +5,7 @@ import { bindUI, selectCharacter, openChat, newChat, getSession, refresh, addUse
 import { bindGenerateUI, generate, generateQuiet, stopGeneration } from './generate.js';
 import { renderChat, appendMessage, renderMessage, updateStreaming, removeMessage, setGenerating, setStatus, setComposerText, renderComposer, renderTopbar, initScrollTracking } from './ui/chat.js';
 import { renderSidebar } from './ui/sidebar.js';
-import { renderPanels, rerenderIfActive } from './ui/panels/index.js';
+import { renderPanels, rerenderIfActive, focusPanelSearch } from './ui/panels/index.js';
 import { applyAppearance } from './ui/panels/settings.js';
 import { setFrontendHandlers, refreshSnapshots, broadcastEvent } from './ui/frontend.js';
 import { importFiles } from './ui/importers.js';
@@ -429,6 +429,12 @@ async function boot() {
 
     document.addEventListener('keydown', (e) => {
         if (e.key === 'Escape' && state.generating && !document.querySelector('.modal-backdrop')) stopGeneration();
+        // Ctrl/⌘+K：打开设置并把光标放进“搜设置和功能”
+        if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'k' && !document.querySelector('.modal-backdrop')) {
+            e.preventDefault();
+            if (app.classList.contains('right-closed')) setDrawer('right', true);
+            focusPanelSearch();
+        }
     });
     window.addEventListener('beforeunload', (e) => {
         if (state.generating) { e.preventDefault(); e.returnValue = ''; }

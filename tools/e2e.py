@@ -1,5 +1,5 @@
 # 端到端测试：无头浏览器跑一遍主要流程（连接、导入卡、MVU、前端卡、世界书、EJS、重刷、重试、停止、编辑、
-# 提示词预览、Claude/Gemini 格式、刷新恢复、手机布局）。依赖：python playwright + tools/mock-llm.mjs。
+# 提示词预览、Claude/Gemini 格式、设置面板分组与搜索、菜单入口、刷新恢复、手机布局）。依赖：python playwright + tools/mock-llm.mjs。
 # 用法：先起 mock（node tools/mock-llm.mjs 8799）和服务（node server.mjs --port 8731 --data <空目录>），再
 #   python tools/e2e.py
 import json
@@ -47,8 +47,37 @@ def mock(path):
         return json.loads(r.read().decode('utf-8'))
 
 
-def right_tab(label):
-    page.locator('#right .tab', has_text=label).first.click()
+# 设置面板：分区 → 所在分组（和 public/js/ui/panels/nav.js 一致）
+SECTION_GROUP = {
+    '连接': 'model', '预设': 'model',
+    '角色卡': 'char', '世界书': 'char', '正则': 'char',
+    '作者注释': 'chat', '变量': 'chat', '提示词预览': 'chat',
+    '用户设定': 'general', '外观与行为': 'general', '导入': 'general',
+}
+
+
+def open_settings(pg=None):
+    pg = pg or page
+    if 'right-closed' in pg.locator('#app').get_attribute('class'):
+        pg.locator('#topbar button[title="设置"]').click()
+        pg.wait_for_timeout(300)
+
+
+def right_tab(label, pg=None):
+    """打开设置面板里的某个分区：先点左边的分组，再点顶上的分区"""
+    pg = pg or page
+    open_settings(pg)
+    pg.locator(f'#right .panel-rail .tab[data-group="{SECTION_GROUP[label]}"]').click()
+    pg.locator('#right .seg-tab', has_text=label).first.click()
+    pg.wait_for_timeout(150)
+
+
+def menu_labels():
+    return [t.strip() for t in page.locator('.menu button').all_inner_texts()]
+
+
+def close_menu():
+    page.mouse.click(5, 450)
     page.wait_for_timeout(150)
 
 
@@ -98,8 +127,6 @@ def main():
         run('打开首页', open_app)
 
         def setup_connection():
-            if not page.locator('#app').get_attribute('class').count('right-closed') == 0:
-                page.locator('#topbar button[title="设置面板"]').click()
             right_tab('连接')
             page.get_by_role('button', name='OpenAI 兼容 / 中转').click()
             page.locator('#right input[placeholder="https://api.openai.com/v1"]').fill(MOCK + '/v1')
@@ -127,7 +154,7 @@ def main():
 
         def import_card():
             with page.expect_file_chooser() as fc:
-                page.locator('#left button[title^="导入角色卡"]').click()
+                page.locator('#chat .home-actions button', has_text='导入角色卡').click()
             fc.value.set_files(FIXTURE)
             page.wait_for_selector('#chat .mes[mesid="0"]', timeout=10000)
             page.wait_for_timeout(1200)
@@ -251,7 +278,7 @@ def main():
         run('编辑 / 隐藏 / 删除消息', edit_hide_delete)
 
         def inspector():
-            right_tab('提示词')
+            right_tab('提示词预览')
             page.locator('#right button', has_text='预览下一次发送').click()
             page.wait_for_selector('#right >> text=估算 tokens', timeout=10000)
             assert page.locator('#right .prompt-msg').count() > 3, '预览里消息太少'
@@ -288,21 +315,159 @@ def main():
             assert mes_count() == n, f'刷新后消息数 {mes_count()}（应为 {n}）'
         run('刷新后恢复上次聊天', reload_restore)
 
+        def settings_groups():
+            open_settings()
+            groups = [t.strip() for t in page.locator('#right .panel-rail .tab').all_inner_texts()]
+            assert groups == ['模型', '角色', '本聊天', '通用'], groups
+            want = {
+                'model': ['连接', '预设'],
+                'char': ['角色卡', '世界书', '正则'],
+                'chat': ['作者注释', '变量', '提示词预览'],
+                'general': ['用户设定', '外观与行为', '导入'],
+            }
+            for gid, sections in want.items():
+                page.locator(f'#right .panel-rail .tab[data-group="{gid}"]').click()
+                page.wait_for_timeout(120)
+                got = [t.strip() for t in page.locator('#right .seg-tab').all_inner_texts()]
+                assert got == sections, f'{gid}: {got}'
+                for sec in sections:
+                    page.locator('#right .seg-tab', has_text=sec).first.click()
+                    page.wait_for_timeout(120)
+                    assert page.locator('#right .seg-tab.active').inner_text().strip() == sec
+                    assert '面板出错' not in page.locator('#right .panel-body').inner_text(), f'{sec} 渲染出错'
+            # 分组记得上次停在哪个分区
+            right_tab('世界书')
+            page.locator('#right .panel-rail .tab[data-group="model"]').click()
+            page.locator('#right .panel-rail .tab[data-group="char"]').click()
+            page.wait_for_timeout(120)
+            assert page.locator('#right .seg-tab.active').inner_text().strip() == '世界书'
+            shot('08-settings-groups')
+        run('设置面板：4 个分组、11 个分区都能打开', settings_groups)
+
+        def settings_search():
+            open_settings()
+            box = page.locator('#right .panel-search input')
+            box.fill('字体大小')  # 别名 → 正文字号
+            page.wait_for_selector('#right .panel-result')
+            first = page.locator('#right .panel-result').first.inner_text()
+            assert_in('正文字号', first, '搜索结果第一条')
+            assert_in('通用 › 外观与行为', first, '搜索结果的位置')
+            shot('09-settings-search')
+            box.press('Enter')
+            page.wait_for_timeout(300)
+            assert page.locator('#right .seg-tab.active').inner_text().strip() == '外观与行为'
+            assert_in('正文字号', page.locator('#right .flash').first.inner_text(), '定位到的那一项')
+            assert box.input_value() == '', '跳过去之后搜索框应该清空'
+            # 折叠块里的项：先展开再定位
+            box.fill('temperature')
+            page.locator('#right .panel-result', has_text='温度').first.click()
+            page.wait_for_timeout(300)
+            assert page.locator('#right .seg-tab.active').inner_text().strip() == '预设'
+            flashed = page.locator('#right .flash').first
+            assert_in('温度', flashed.inner_text(), '定位到的那一项')
+            assert flashed.is_visible(), '温度在折叠块里，没被展开'
+            # 清单里每一项都要真的能定位到（切分区 → 展开折叠块 → 那一项可见并高亮）
+            missed = page.evaluate('''async () => {
+                const { FEATURES } = await import('/js/ui/panels/search.js');
+                const { openFeature } = await import('/js/ui/panels/index.js');
+                const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+                const out = [];
+                for (const f of FEATURES) {
+                    if (f.action) continue;
+                    document.querySelectorAll('#right .flash').forEach(el => el.classList.remove('flash'));
+                    openFeature(f);
+                    let el = null;
+                    for (let i = 0; i < 12 && f.find && !el; i++) { await sleep(60); el = document.querySelector('#right .flash'); }
+                    if (document.querySelector('#right').dataset.tab !== f.tab) out.push(`${f.t}: 没切到 ${f.tab}`);
+                    else if (f.find && !el) out.push(`${f.t}: 找不到「${f.find}」`);
+                    else if (el && !(el.offsetWidth && el.offsetHeight)) out.push(`${f.t}: 找到了但没显示出来`);
+                    else if (el) { const r = el.getBoundingClientRect(), b = document.querySelector('#right .panel-body').getBoundingClientRect(); if (r.bottom < b.top || r.top > b.bottom) out.push(`${f.t}: 没滚到可见范围`); }
+                }
+                return out;
+            }''')
+            assert not missed, f'搜索清单里有定位不到的项：{missed}'
+            # 没结果时给提示，不是空白
+            box.fill('这个功能不存在xyz')
+            page.wait_for_selector('#right .panel-results-empty')
+            box.press('Escape')
+            page.wait_for_timeout(100)
+            assert page.locator('#right .panel-results').is_hidden()
+            # Ctrl+K 直接进搜索框（面板收起时先打开）
+            page.locator('#right button[title="收起"]').click()
+            page.wait_for_timeout(300)
+            page.keyboard.press('Control+k')
+            page.wait_for_timeout(300)
+            assert 'right-closed' not in page.locator('#app').get_attribute('class'), 'Ctrl+K 没打开设置面板'
+            assert page.evaluate("document.activeElement === document.querySelector('#right .panel-search input')"), '光标没进搜索框'
+            # 面板外的动作也能搜到并直接执行
+            chats = page.locator('#left .chat-item').count()
+            page.keyboard.type('新聊天')
+            first = page.locator('#right .panel-result').first
+            assert_in('直接执行', first.inner_text(), '动作类结果')
+            page.keyboard.press('Enter')
+            page.wait_for_function(f"() => document.querySelectorAll('#left .chat-item').length === {chats + 1}", timeout=5000)
+            assert mes_count() == 1, f'新聊天应该只有开场白，实际 {mes_count()} 条'
+        run('设置面板：搜功能并跳到对应位置', settings_search)
+
+        def one_home_per_feature():
+            # 输入框的 +：只有三种生成方式
+            page.locator('#composer .composer-bar .tool').click()
+            got = menu_labels()
+            assert got == ['继续写最后一条', '重新生成最后一条', '代我写一条（扮演用户）'], got
+            close_menu()
+            # 标题菜单：只有对这个聊天本身的操作
+            page.locator('#topbar .title-btn').click()
+            got = menu_labels()
+            assert got == ['重命名', '导出 JSONL（酒馆可直接导入）', '删除聊天'], got
+            close_menu()
+            # 消息的“更多”里不再重复“重新生成 / 继续写”
+            last = page.locator('#chat .mes').last
+            last.hover()
+            last.locator('button[title="更多"]').click()
+            got = menu_labels()
+            assert not any(x in ('重新生成', '继续写') for x in got), got
+            assert_in('从这里分支', ' '.join(got), '消息菜单')
+            close_menu()
+            # 左栏只剩导航；顶栏没有图标猜谜
+            nav = [t.strip() for t in page.locator('#left .side-nav .nav-item').all_inner_texts()]
+            assert [n.split('\n')[0] for n in nav] == ['新聊天', '角色库'], nav
+            assert page.locator('#left .side-head button').count() == 1, '左栏头部应该只剩“收起”'
+            assert page.locator('#topbar .tb-btn.toggle-right').inner_text().strip() == '设置'
+        run('每个功能只留一个入口（+ / 标题 / 消息菜单 / 左栏）', one_home_per_feature)
+
+        def preset_chip():
+            page.locator('#composer-preset').click()
+            got = menu_labels()
+            assert got[-1] == '编辑预设…' and len(got) >= 2, got
+            assert page.locator('.menu button.current').count() == 1, '当前预设没打勾'
+            page.locator('.menu button', has_text='编辑预设…').click()
+            page.wait_for_timeout(300)
+            assert page.locator('#right .seg-tab.active').inner_text().strip() == '预设'
+        run('输入框上直接切换预设', preset_chip)
+
         def toggle_theme():
+            # 深浅色只在“设置 › 通用 › 外观与行为”里；搜“深色”能直接到
             before = page.evaluate("document.documentElement.dataset.theme")
             assert before in ('light', 'dark'), f'主题属性异常：{before!r}'
-            page.locator('#topbar button[title="切换深浅色"]').click()
+            other = 'dark' if before == 'light' else 'light'
+            open_settings()
+            page.locator('#right .panel-search input').fill('深色')
+            page.locator('#right .panel-result', has_text='主题').first.click()
+            page.wait_for_timeout(300)
+            sel = page.locator('#right .field', has_text='主题').locator('select')
+            sel.select_option(other)
             page.wait_for_timeout(300)
             after = page.evaluate("document.documentElement.dataset.theme")
-            assert after != before, f'点了切换主题没变（还是 {after}）'
-            shot(f'08-{after}')
+            assert after == other, f'换了主题没变（还是 {after}）'
+            shot(f'10-{after}')
             page.reload()
             page.wait_for_selector('#chat .mes')
             assert page.evaluate("document.documentElement.dataset.theme") == after, '刷新后主题没保住'
-            page.locator('#topbar button[title="切换深浅色"]').click()
+            right_tab('外观与行为')
+            page.locator('#right .field', has_text='主题').locator('select').select_option('auto')
             page.wait_for_timeout(300)
             assert page.evaluate("document.documentElement.dataset.theme") == before
-        run('切换深浅色并在刷新后保持', toggle_theme)
+        run('在设置里切换深浅色并在刷新后保持', toggle_theme)
 
         def mobile():
             mctx = browser.new_context(viewport={'width': 390, 'height': 844}, is_mobile=True, has_touch=True, locale='zh-CN')
@@ -311,17 +476,46 @@ def main():
             mp.goto(BASE + '/')
             mp.wait_for_selector('#chat .mes')
             mp.wait_for_timeout(1500)
-            mp.screenshot(path=os.path.join(SHOTS, '09-mobile-chat.png'))
-            mp.locator('#topbar button[title="角色列表"]').click()
+            mp.screenshot(path=os.path.join(SHOTS, '11-mobile-chat.png'))
+
+            def no_overflow(where):
+                sw = mp.evaluate('document.documentElement.scrollWidth')
+                assert sw <= 390, f'{where}：手机上横向溢出 {sw}px'
+                bad = mp.evaluate('''() => [...document.querySelectorAll('#topbar *, #composer *, #right .panel-main > *, #right .panel-rail *, #left > *')]
+                    .filter(el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && r.right > innerWidth + 1 && getComputedStyle(el.closest('.drawer') ?? el).transform === 'none'; })
+                    .map(el => el.className || el.tagName).slice(0, 5)''')
+                assert not bad, f'{where}：有元素伸出屏幕右边 {bad}'
+
+            # 手机上没有悬停提示：顶栏两个按钮带文字，输入框上能看到当前预设
+            labels = [t.strip() for t in mp.locator('#topbar .tb-btn').all_inner_texts()]
+            assert labels == ['菜单', '设置'], labels
+            assert mp.locator('#composer-preset').is_visible(), '手机上看不到预设切换'
+            assert mp.locator('#composer-model').is_visible()
+            no_overflow('聊天页')
+            mp.locator('#topbar button[title="菜单"]').click()
             mp.wait_for_timeout(400)
-            mp.screenshot(path=os.path.join(SHOTS, '10-mobile-left.png'))
+            mp.screenshot(path=os.path.join(SHOTS, '12-mobile-left.png'))
             mp.locator('#scrim').click(position={'x': 370, 'y': 400})
             mp.wait_for_timeout(400)
-            mp.locator('#topbar button[title="设置面板"]').click()
+            mp.locator('#topbar button[title="设置"]').click()
             mp.wait_for_timeout(400)
-            mp.screenshot(path=os.path.join(SHOTS, '11-mobile-right.png'))
-            sw = mp.evaluate('document.documentElement.scrollWidth')
-            assert sw <= 390, f'手机上横向溢出 {sw}px'
+            right_tab('预设', mp)
+            mp.screenshot(path=os.path.join(SHOTS, '13-mobile-settings.png'))
+            no_overflow('设置面板')
+            for gid in ('model', 'char', 'chat', 'general'):
+                mp.locator(f'#right .panel-rail .tab[data-group="{gid}"]').click()
+                mp.wait_for_timeout(150)
+                clipped = mp.evaluate("[...document.querySelectorAll('#right .seg-tab')].filter(b => b.scrollWidth > b.clientWidth).map(b => b.textContent)")
+                assert not clipped, f'分区名字显示不全：{clipped}'
+            mp.locator('#right .panel-search input').fill('开场白')
+            mp.wait_for_selector('#right .panel-result')
+            mp.screenshot(path=os.path.join(SHOTS, '14-mobile-search.png'))
+            no_overflow('搜索结果')
+            mp.locator('#right .panel-result').first.click()
+            mp.wait_for_timeout(400)
+            assert mp.locator('#right .seg-tab.active').inner_text().strip() == '角色卡'
+            assert mp.locator('#right .flash').first.is_visible(), '手机上搜索后没定位到那一项'
+            mp.screenshot(path=os.path.join(SHOTS, '15-mobile-search-jump.png'))
             mctx.close()
         run('手机布局（390px）', mobile)
 

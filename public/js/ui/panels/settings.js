@@ -39,7 +39,8 @@ export function render(body) {
     const rerender = () => { save(); refresh('chat'); };
 
     body.append(section('外观',
-        field('主题', select(s, 'theme', [{ value: 'auto', label: '跟随系统' }, { value: 'light', label: '浅色' }, { value: 'dark', label: '深色' }], { onChange: () => { look(); refresh('topbar'); } })),
+        // 主题立刻落盘（不等防抖）：换完马上刷新或关页面也要保住
+        field('主题', select(s, 'theme', [{ value: 'auto', label: '跟随系统' }, { value: 'light', label: '浅色' }, { value: 'dark', label: '深色' }], { onChange: () => { applyAppearance(); saveSettings({ now: true }); } })),
         field('正文字号', rangeRow(ui, 'fontSize', { min: 12, max: 24, step: 0.5, onChange: look })),
         field('聊天区宽度（px）', rangeRow(ui, 'chatWidth', { min: 560, max: 1600, step: 20, onChange: look })),
         checkbox(ui, 'showReasoning', '显示思维链（可折叠）', { onChange: rerender }),

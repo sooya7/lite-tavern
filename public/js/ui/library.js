@@ -133,9 +133,9 @@ async function open(c) {
 function onboarding() {
     return h('div', {},
         h('div', { class: 'steps' },
-            h('div', { class: 'step' }, h('b', {}, '1'), h('div', {}, '在右侧「连接」里填 API 地址和 Key（OpenAI 兼容 / Claude / Gemini）')),
-            h('div', { class: 'step' }, h('b', {}, '2'), h('div', {}, '导入角色卡（PNG / JSON，可以直接拖进窗口），或在「导入」里一键从酒馆搬数据')),
-            h('div', { class: 'step' }, h('b', {}, '3'), h('div', {}, '「预设」里导入你常用的对话补全预设，开聊')),
+            h('div', { class: 'step' }, h('b', {}, '1'), h('div', {}, '在「设置 › 模型 › 连接」里填 API 地址和 Key（OpenAI 兼容 / Claude / Gemini）')),
+            h('div', { class: 'step' }, h('b', {}, '2'), h('div', {}, '导入角色卡（PNG / JSON，可以直接拖进窗口），或在「设置 › 通用 › 导入」里一键从酒馆搬数据')),
+            h('div', { class: 'step' }, h('b', {}, '3'), h('div', {}, '在「设置 › 模型 › 预设」里导入你常用的对话补全预设，开聊')),
         ),
         h('div', { class: 'home-actions' },
             h('button', { class: 'btn primary', onclick: () => openPanel('import') }, icon('import'), '从酒馆导入'),

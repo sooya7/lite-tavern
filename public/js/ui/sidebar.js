@@ -1,4 +1,5 @@
-// 左栏：新聊天 / 角色库入口、最近角色、当前角色的聊天记录、底部用户设定
+// 左栏：新聊天 / 角色库入口、最近角色、当前角色的聊天记录、底部用户设定。
+// 这里只放“去哪儿”：导入和新建角色在角色库页，其余设置都在右侧设置面板（每个功能只留一个入口）。
 import { h, $, clear, icon, iconBtn, toast, confirmDialog, promptDialog, popupMenu, pickFiles, formatTime, downloadText, brandMark } from './dom.js';
 import { state, saveSettings, refreshLists, activePersona } from '../state.js';
 import { api } from '../api.js';
@@ -71,7 +72,6 @@ export function renderSidebar() {
     root.append(
         h('div', { class: 'side-head' },
             h('div', { class: 'brand' }, brandMark(), '轻酒馆'),
-            iconBtn('upload', '导入角色卡 / 预设 / 世界书（也可以直接把文件拖进窗口）', onImport),
             iconBtn(isNarrow() ? 'x' : 'panelLeft', '收起侧栏', () => window.dispatchEvent(new CustomEvent('lt:toggle-left', { detail: false }))),
         ),
         h('div', { class: 'side-nav' },
@@ -82,7 +82,6 @@ export function renderSidebar() {
             }, h('span', { class: 'nc-ic' }, icon('plus')), '新聊天'),
             h('button', { class: `nav-item ${home ? 'active' : ''}`, onclick: goHome }, icon('users'), '角色库',
                 h('span', { class: 'nav-count' }, state.characters.length || '')),
-            h('button', { class: 'nav-item', onclick: () => { openPanel('import'); } }, icon('import'), '从酒馆导入'),
         ),
         list,
         sideFoot(),
@@ -95,14 +94,12 @@ export function renderSidebar() {
 function sideFoot() {
     const p = activePersona();
     return h('div', { class: 'side-foot' },
-        h('div', { class: 'row', style: { gap: '2px' } },
-            h('button', { class: 'persona-row grow', title: '用户设定（你在故事里的身份）', onclick: () => { openPanel('persona'); } },
-                personaAvatar(p),
-                h('div', { class: 'grow' },
-                    h('div', { class: 'p-name' }, p.name || 'User'),
-                    h('div', { class: 'p-sub' }, `用户设定${state.settings.personas.length > 1 ? ` · 共 ${state.settings.personas.length} 个` : ''}`))),
-            iconBtn('settings', '设置', () => openPanel('settings')),
-        ));
+        h('button', { class: 'persona-row', title: '用户设定（你在故事里的身份）', onclick: () => { openPanel('persona'); } },
+            personaAvatar(p),
+            h('div', { class: 'grow' },
+                h('div', { class: 'p-name' }, p.name || 'User'),
+                h('div', { class: 'p-sub' }, `用户设定${state.settings.personas.length > 1 ? ` · 共 ${state.settings.personas.length} 个` : ''}`)),
+            icon('right', 'p-go')));
 }
 
 function charSort(a, b) {
@@ -120,11 +117,7 @@ function renderRecentChars(list) {
         h('span', { class: 'grow' }, '最近角色'),
         all.length > items.length ? h('button', { class: 'section-link', onclick: goHome }, `全部 ${all.length}`) : null));
     if (!items.length) {
-        list.append(h('div', { class: 'empty small', style: { padding: '12px' } },
-            h('div', {}, '还没有角色'),
-            h('div', { class: 'row', style: { justifyContent: 'center', marginTop: '10px', flexWrap: 'wrap' } },
-                h('button', { class: 'btn small', onclick: onImport }, icon('upload'), '导入卡'),
-                h('button', { class: 'btn small', onclick: () => openPanel('import') }, icon('import'), '从酒馆搬'))));
+        list.append(h('div', { class: 'empty small', style: { padding: '12px' } }, '还没有角色，去角色库导入或新建一个'));
         return;
     }
     for (const c of items) list.append(charItem(c));
@@ -153,7 +146,7 @@ function charItem(c) {
 
 export function charMenu(anchor, c) {
     popupMenu(anchor, [
-        { label: '编辑角色卡', icon: 'edit', onClick: async () => { if (state.char?.file !== c.file) await selectCharacter(c.file); window.dispatchEvent(new CustomEvent('lt:open-panel', { detail: 'char' })); } },
+        { label: '编辑角色卡', icon: 'edit', onClick: async () => { if (state.char?.file !== c.file) await selectCharacter(c.file); openPanel('char'); } },
         { label: c.fav ? '取消收藏' : '收藏', icon: 'star', onClick: () => toggleFav(c) },
         { label: '导出 PNG 卡', icon: 'download', onClick: () => window.open(api.exportCharacterUrl(c.file, 'png'), '_blank') },
         { label: '导出 JSON', icon: 'download', onClick: () => window.open(api.exportCharacterUrl(c.file, 'json'), '_blank') },
@@ -210,7 +203,7 @@ export async function onCreate() {
         const { file } = await api.createCharacter(card);
         await reloadCharacters();
         await selectCharacter(file);
-        window.dispatchEvent(new CustomEvent('lt:open-panel', { detail: 'char' }));
+        openPanel('char');
     } catch (e) {
         toast(`创建失败：${e.message}`, 'error');
     }

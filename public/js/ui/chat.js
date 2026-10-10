@@ -2,7 +2,7 @@
 import { h, $, clear, icon, iconBtn, toast, confirmDialog, popupMenu, formatTime, modal } from './dom.js';
 import { state, eventSource, event_types, saveChat, saveSettings, activePersona, activeConnection } from '../state.js';
 import { api } from '../api.js';
-import { getSession, editMessage, deleteMessages, toggleHidden, branchChat, newChat, refresh } from '../controller.js';
+import { getSession, editMessage, deleteMessages, toggleHidden, branchChat, setPreset, refresh } from '../controller.js';
 import { generate, stopGeneration } from '../generate.js';
 import { formatMessage, mountFormatted, renderReasoning } from './render.js';
 import { mountFrontend, refreshSnapshots } from './frontend.js';
@@ -10,8 +10,7 @@ import { messageText, setSwipe, deleteSwipe, ensureSwipes } from '../core/chat.j
 import { parseSendDate } from '../core/util.js';
 import { renderHome } from './library.js';
 import { charAvatar, letterAvatar } from './avatars.js';
-import { chatTitle, startNewChat, goHome, renameChat, exportChat, deleteChat } from './sidebar.js';
-import { resolvedTheme, applyAppearance } from './panels/settings.js';
+import { chatTitle, renameChat, exportChat, deleteChat } from './sidebar.js';
 
 const RENDER_WINDOW = 80;
 let renderFrom = 0;
@@ -276,9 +275,8 @@ function startEdit(i) {
 function messageMenu(anchor, i) {
     const m = state.chat.messages[i];
     const isLast = i === state.chat.messages.length - 1;
+    // 重新生成在消息下面那排按钮里，继续写在输入框的 + 里，这里不再重复
     popupMenu(anchor, [
-        isLast && !m.is_user ? { label: '重新生成', icon: 'refresh', onClick: () => generate('regenerate') } : null,
-        isLast && !m.is_user ? { label: '继续写', icon: 'continue', onClick: () => generate('continue') } : null,
         { label: m.is_system ? '取消隐藏（重新发给 AI）' : '隐藏（不发给 AI）', icon: m.is_system ? 'eye' : 'eyeOff', onClick: () => toggleHidden(i) },
         { label: '从这里分支', icon: 'branch', onClick: () => branchChat(i) },
         Array.isArray(m.swipes) && m.swipes.length > 1 ? { label: '删除当前这个回复版本', icon: 'x', onClick: () => { deleteSwipe(m); getSession()?.vars.invalidate(); renderMessage(i); saveChat(); } } : null,
@@ -299,12 +297,12 @@ export function renderComposer() {
     const coarse = matchMedia('(pointer: coarse)').matches;
     textarea = h('textarea', { id: 'send_textarea', rows: 1, placeholder: coarse || !state.settings.ui.enterToSend ? '说点什么…' : '说点什么…（Enter 发送，Shift+Enter 换行）' });
     const sendBtn = h('button', { class: 'icon-btn send-btn primary', id: 'send_but', type: 'button', title: '发送', 'aria-label': '发送', onclick: onSend }, icon('arrowUp'));
-    const moreBtn = iconBtn('plus', '更多操作', (e) => composerMenu(e.currentTarget), 'tool');
+    const moreBtn = iconBtn('plus', '让 AI 继续写 / 重新生成 / 代我写', (e) => composerMenu(e.currentTarget), 'tool');
     const bar = h('div', { class: 'composer-bar' },
         moreBtn,
-        h('button', { class: 'chip preset', type: 'button', id: 'composer-preset', title: '对话补全预设', onclick: () => openPanel('preset') }),
+        h('button', { class: 'chip preset', type: 'button', id: 'composer-preset', title: '切换预设', onclick: (e) => presetMenu(e.currentTarget) }),
         h('div', { class: 'grow' }),
-        h('button', { class: 'chip model', type: 'button', id: 'composer-model', title: '切换 API 连接', onclick: (e) => connectionMenu(e.currentTarget) }),
+        h('button', { class: 'chip model', type: 'button', id: 'composer-model', title: '切换连接', onclick: (e) => connectionMenu(e.currentTarget) }),
         sendBtn);
     const box = h('div', { class: 'composer-box' }, textarea, bar);
     box.addEventListener('mousedown', (e) => { if (e.target === box) { e.preventDefault(); textarea.focus(); } });
@@ -334,7 +332,7 @@ const openPanel = (id) => window.dispatchEvent(new CustomEvent('lt:open-panel', 
 /** 输入框工具条上的“预设 / 模型”小标签 */
 export function updateComposerChips() {
     const presetChip = $('#composer-preset');
-    if (presetChip) presetChip.replaceChildren(icon('sliders'), h('span', { class: 'chip-t' }, state.preset?.name ?? '预设'));
+    if (presetChip) presetChip.replaceChildren(icon('sliders'), h('span', { class: 'chip-t' }, state.preset?.name ?? '预设'), icon('chevronDown'));
     const modelChip = $('#composer-model');
     if (modelChip) {
         const conn = state.settings.connections.length ? activeConnection() : null;
@@ -363,6 +361,20 @@ function connectionMenu(anchor) {
     ]);
 }
 
+function presetMenu(anchor) {
+    const cur = state.preset?.name;
+    popupMenu(anchor, [
+        ...state.presetList.map(p => ({
+            label: p.name,
+            icon: 'sliders',
+            current: p.name === cur,
+            onClick: () => { if (p.name !== cur) setPreset(p.name); },
+        })),
+        '-',
+        { label: '编辑预设…', icon: 'settings', onClick: () => openPanel('preset') },
+    ]);
+}
+
 function onSend() {
     if (state.generating) { stopGeneration(); return; }
     const text = textarea.value;
@@ -371,15 +383,12 @@ function onSend() {
     generate('normal', { input: text });
 }
 
+/** 输入框的 +：只放“让 AI 生成”的几种方式，其余功能各回各家（新聊天在左栏，作者注释 / 提示词预览在设置 › 本聊天） */
 function composerMenu(anchor) {
     popupMenu(anchor, [
         { label: '继续写最后一条', icon: 'continue', onClick: () => generate('continue') },
         { label: '重新生成最后一条', icon: 'refresh', onClick: () => generate('regenerate') },
         { label: '代我写一条（扮演用户）', icon: 'mask', onClick: () => generate('impersonate') },
-        '-',
-        { label: '作者注释', icon: 'note', onClick: () => window.dispatchEvent(new CustomEvent('lt:open-panel', { detail: 'note' })) },
-        { label: '查看将要发送的提示词', icon: 'terminal', onClick: () => window.dispatchEvent(new CustomEvent('lt:open-panel', { detail: 'inspector' })) },
-        { label: '新建聊天', icon: 'plus', onClick: () => newChat() },
     ]);
 }
 
@@ -415,11 +424,13 @@ export function renderTopbar() {
     const bar = $('#topbar');
     clear(bar);
     const app = $('#app');
-    bar.append(iconBtn('panelLeft', '角色列表', () => window.dispatchEvent(new CustomEvent('lt:toggle-left')), 'toggle-left'));
+    // 手机上没有悬停提示，按钮都带文字
+    bar.append(h('button', { class: 'tb-btn toggle-left', type: 'button', title: '菜单', 'aria-label': '菜单：角色和聊天记录', onclick: () => window.dispatchEvent(new CustomEvent('lt:toggle-left')) },
+        icon('menu'), h('span', { class: 'lbl' }, '菜单')));
     if (state.char && state.view !== 'home') {
         const card = state.char.card.data;
         const sub = state.chat ? chatTitle(state.chat.name, card.name) : '';
-        bar.append(h('button', { class: 'title-btn', title: '聊天操作', onclick: (e) => titleMenu(e.currentTarget) },
+        bar.append(h('button', { class: 'title-btn', title: '这个聊天：重命名 / 导出 / 删除', onclick: (e) => titleMenu(e.currentTarget) },
             charAvatar(state.char.file, 'avatar', { name: card.name }),
             h('span', { class: 'n' }, card.name),
             sub ? h('span', { class: 's' }, `/ ${sub}`) : null,
@@ -429,29 +440,21 @@ export function renderTopbar() {
     }
     bar.append(
         h('div', { class: 'spacer' }),
-        iconBtn(resolvedTheme() === 'light' ? 'moon' : 'sun', '切换深浅色', () => {
-            state.settings.theme = resolvedTheme() === 'light' ? 'dark' : 'light';
-            applyAppearance();
-            saveSettings({ now: true });
-            renderTopbar();
-        }),
-        iconBtn('panelRight', '设置面板', () => window.dispatchEvent(new CustomEvent('lt:toggle-right')), app.classList.contains('right-closed') ? '' : 'active'),
+        h('button', { class: `tb-btn toggle-right ${app.classList.contains('right-closed') ? '' : 'active'}`, type: 'button', title: '设置', 'aria-label': '设置：模型、角色、本聊天、通用', onclick: () => window.dispatchEvent(new CustomEvent('lt:toggle-right')) },
+            icon('sliders'), h('span', { class: 'lbl' }, '设置')),
     );
     updateComposerChips();
 }
 
 function titleMenu(anchor) {
     const c = state.chat && state.chatList.find(x => x.name === state.chat.name);
+    // 只放对“这个聊天”本身的操作，和左栏聊天记录的 ⋮ 一致；新聊天 / 角色库在左栏，角色卡和作者注释在设置里
+    if (!c) return;
     popupMenu(anchor, [
-        { label: '新聊天', icon: 'plus', onClick: () => startNewChat(anchor) },
-        c ? { label: '重命名这个聊天', icon: 'edit', onClick: () => renameChat(c) } : null,
-        c ? { label: '导出 JSONL（酒馆可直接导入）', icon: 'download', onClick: () => exportChat(c) } : null,
+        { label: '重命名', icon: 'edit', onClick: () => renameChat(c) },
+        { label: '导出 JSONL（酒馆可直接导入）', icon: 'download', onClick: () => exportChat(c) },
         '-',
-        { label: '编辑角色卡', icon: 'idCard', onClick: () => openPanel('char') },
-        { label: '本聊天的设置（作者注释等）', icon: 'note', onClick: () => openPanel('note') },
-        { label: '回到角色库', icon: 'users', onClick: () => goHome() },
-        c ? '-' : null,
-        c ? { label: '删除这个聊天', icon: 'trash', danger: true, onClick: () => deleteChat(c) } : null,
+        { label: '删除聊天', icon: 'trash', danger: true, onClick: () => deleteChat(c) },
     ]);
 }
 

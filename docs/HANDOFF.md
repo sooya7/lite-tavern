@@ -29,8 +29,8 @@ public/
     api.js state.js controller.js generate.js app.js
   js/ui/                界面
     dom.js render.js frontend.js chat.js sidebar.js library.js avatars.js importers.js form.js
-    panels/ index connection preset char world regex persona note vars inspector settings import
-test/core.test.mjs      核心单元测试（14 项）
+    panels/ index nav search connection preset char world regex persona note vars inspector settings import
+test/core.test.mjs      核心单元测试（15 项）
 tools/
   e2e.py                Playwright 端到端测试
   mock-llm.mjs          假模型服务（OpenAI / Claude / Gemini，可模拟 429、错误正文、空回复、慢速）
@@ -44,11 +44,22 @@ docs/HANDOFF.md         本文档
 ## 2.5 界面结构（2026-10-10 改成 Claude app 风格）
 
 - 配色：浅色暖白 `#faf9f5` / 侧栏 `#f5f4ed`，深色 `#262624` / `#1f1e1d`，强调色陶土橙 `#c96442`。全部是 `app.css` 顶部的变量，深色在 `:root[data-theme="dark"]`。主题 `auto | light | dark`，默认跟随系统；`index.html` 里有一段内联脚本按 localStorage 先上色，防止刷新闪白
-- 左栏（`ui/sidebar.js`）：品牌 → 新聊天 / 角色库 / 从酒馆导入 → 最近角色（收藏优先，最多 6 个）→ 当前角色的聊天记录（默认聊天名显示成日期）→ 底部用户设定
+- 左栏（`ui/sidebar.js`）：品牌 → 新聊天 / 角色库 → 最近角色（收藏优先，最多 6 个）→ 当前角色的聊天记录（默认聊天名显示成日期）→ 底部用户设定。左栏只放“去哪儿”，不放导入和设置入口
 - 首页（`ui/library.js`，`state.view === 'home'` 或没选角色时显示）：问候语、继续上次的聊天、角色库卡片网格（搜索 / 排序）；一张卡都没有时显示上手步骤。首页隐藏输入框
 - 消息（`ui/chat.js` 的 `buildMessage`）：用户消息是右侧气泡；角色消息通栏、头部小头像 + 名字。全站（界面 + 正文）统一用 `--font-read` 衬线字体栈，只有代码用等宽。操作按钮（复制 / 编辑 / 重新生成 / 更多）和 swipe 在消息下方一行
-- 输入框：大圆角框，下方工具条：`+`（更多操作）、当前预设、当前连接（点开切换）、发送 / 停止
-- 右栏（`ui/panels/index.js`）：左侧竖向图标导航 + 标题栏 + 内容，11 个面板一次全显示
+- 顶栏：`菜单`（左栏开关，电脑上左栏展开时不显示）、标题（点开是这个聊天的重命名 / 导出 / 删除）、`设置`（右栏开关）。两个按钮都带文字，手机上没有悬停提示
+- 输入框：大圆角框，下方工具条：`+`（只有继续写 / 重新生成 / 代我写）、当前预设（点开直接切换）、当前连接（点开直接切换）、发送 / 停止。手机上预设和连接都显示
+- 右栏 = 设置面板（`ui/panels/index.js`）：左侧 4 个分组，顶上是“搜设置和功能”和当前分组的分区，下面是分区内容。结构定义在 `ui/panels/nav.js`：
+  - 模型：连接、预设
+  - 角色：角色卡、世界书、正则
+  - 本聊天：作者注释、变量、提示词预览
+  - 通用：用户设定、外观与行为、导入
+  - 分区 id 没变（`connection` `preset` `char` `world` `regex` `note` `vars` `inspector` `persona` `settings` `import`），仍是 `settings.ui.rightTab` 的取值和 `lt:open-panel` 事件的参数；每个分组记得上次停在哪个分区
+- 搜功能（`ui/panels/search.js`）：一份手写的功能清单（名字 + 别名 + 所在分区 + 定位文字），选中后切到分区、展开折叠块、滚到那一项并闪一下；`Ctrl/⌘+K` 直接进搜索框。面板上的标签文字改了要同步清单，单测会检查清单里的定位文字都在对应面板源码里，端到端会把清单逐项点一遍
+- 入口约定（2026-10-10 整理，起因是用户反馈“找功能很复杂”）：**每个功能只留一个入口**，加新功能时先想它属于哪个分组，不要再往 `+`、标题菜单、左栏里塞快捷方式
+  - 新聊天、角色库 → 左栏；导入角色卡、新建角色 → 角色库页；其余导入 → 设置 › 通用 › 导入（文件也可以直接拖进窗口）
+  - 深浅色 → 设置 › 通用 › 外观与行为（顶栏的月亮按钮已去掉；主题改动立即落盘）
+  - 重新生成 → 最后一条回复下面的按钮；继续写 / 代我写 → 输入框的 `+`；消息的 `⋮` 里只剩隐藏、分支、删除等对这条消息的操作
 - 头像：列表、消息、顶栏都用 `api.thumbUrl()` 的缩略图（`?thumb=1&v=<mtime>`，带版本号时浏览器长期缓存）；导出卡和角色编辑仍是原图
 
 ## 3. 关键数据流
@@ -75,8 +86,8 @@ docs/HANDOFF.md         本文档
 
 ## 5. 当前状态（已验证的部分）
 
-- `npm test`：14 项核心单元测试全过（宏、正则、世界书、EJS、MVU、变量、提示词组装、接口格式、PNG/JSONL 往返、前端卡识别、缩略图）
-- 端到端（无头 Chromium + 假模型）17/17 通过，含“中途停止”。注意每次跑前要重启 `mock-llm.mjs`：429 / 错误正文用例是“每个进程只触发一次”，复用旧进程会误报“没有重试”
+- `npm test`：15 项核心单元测试全过（宏、正则、世界书、EJS、MVU、变量、提示词组装、接口格式、PNG/JSONL 往返、前端卡识别、缩略图、设置面板结构与搜索清单）
+- 端到端（无头 Chromium + 假模型）21/21 通过，含“中途停止”、设置面板 4 组 11 区逐个打开、搜索清单逐项定位、各菜单的条目、手机上顶栏文字和预设切换。注意每次跑前要重启 `mock-llm.mjs`：429 / 错误正文用例是“每个进程只触发一次”，复用旧进程会误报“没有重试”
 - 2026-10-10 用 117 服务器上 Luker 的真实数据实测（导入 25 角色 / 22 聊天 / 6 预设 / 33 世界书 / 10 正则，0 错误）：
   - 角色库 25 张卡缩略图共约 1.7 MB（原图合计约 82 MB，最大一张 15.9 MB → 61 KB），每张首次生成 50–250 ms
   - “咩咩预设 - ver 0.9.0”组提示词约 2.9 万 tokens、激活 17 条世界书，无 EJS / 宏残留
@@ -88,6 +99,7 @@ docs/HANDOFF.md         本文档
   - 界面、输入框、按钮、用户消息和角色正文的计算字体一致；浅色 / 深色切换正常；390px 聊天页和 25 张卡的角色库没有横向溢出；页面脚本错误为 0
   - 本次浏览器验证使用内存中的临时聊天，拦截测试产生的保存请求，没有写入服务器聊天和设置
   - 服务端 60 个运行文件与本地 SHA-256 全部一致；`lite-tavern.service` 正常运行且已启用开机自启；nginx 配置检查通过，证书续期 timer 已启用且运行中
+- 2026-10-10 入口整理（右栏 11 个标签并成 4 组、去重复入口、搜功能）：在 320 / 360 / 390 / 430px 四个宽度下用超长角色名、预设名、模型名检查过顶栏和输入框工具条，没有重叠和溢出；1024px（右栏变抽屉）和 1440px 看过截图
 - 这轮真实数据顺带修掉的老问题：Windows 换行（`\r\n`）的卡前端界面识别不出来；单行 ```` ```地点·时间``` ```` 被当成代码块开头、吞掉整段正文塞进 iframe；导入后所有文件时间变成导入时刻（“最近使用”排序失效）；左栏当前聊天条数不更新；提示词预览里预设自定义条目显示成 UUID
 
 ## 6. 没覆盖 / 已知限制
@@ -99,7 +111,8 @@ docs/HANDOFF.md         本文档
 - token 数是估算（没有真实分词器）
 - 前端卡 iframe 是无同源沙箱（origin 为 null），卡里直接 fetch 第三方图床（如某张卡用的 r2.dev）会被对方的 CORS 拦掉
 - 缩略图不支持隔行扫描 PNG 和非 PNG 头像，遇到时自动退回原图
-- 只在无头浏览器 390px 宽度看过手机布局，没在真机上试
+- 只在无头浏览器里看过手机布局（320–430px），没在真机上试
+- 搜功能的清单是手写的，只覆盖设置面板里的项和少数几个动作（新聊天、角色库、新建角色），不搜角色、聊天内容
 
 ## 7. 建议的下一步
 
@@ -126,4 +139,6 @@ docs/HANDOFF.md         本文档
 - 连接“Luker 中转”的 Key 从 Luker 的 secrets.json 复制到 `data/secrets.json`（0600），不在仓库和文档里
 - 查看状态：`ssh kaze1 'systemctl status lite-tavern --no-pager'`；查看日志：`ssh kaze1 'journalctl -u lite-tavern -n 100 --no-pager'`
 - 更新代码：本地 `tar --exclude=.git --exclude=data -czf - . | ssh kaze1 'tar -xzf - -C /opt/lite-tavern/app'`，再 `ssh kaze1 'systemctl restart lite-tavern'`。更改 nginx 配置后先 `nginx -t`，再重载 nginx
+- 也可以让服务器直接从 GitHub 取（仓库是公开的，服务器上没有推送凭据，只能拉）：`git clone --depth 1 -b <分支> https://github.com/sooya7/lite-tavern /tmp/lt-src`，再把 `public server server.mjs package.json README.md docs test tools` 同步到 `/opt/lite-tavern/app` 并重启。2026-10-10 的入口整理就是这样部署的
+- 注意仓库和服务器的先后：2026-10-10 上午的 Claude 风格改版只部署到了服务器，当时没有推到 GitHub；入口整理时先把服务器上的 60 个文件原样取回提交（分支 `claude/simplify-navigation` 的第一个提交），再在上面改。本地工作副本如果还停在改版那一步，先拉这个分支再继续，否则下次从本地打包部署会把入口整理覆盖掉
 - 本次收尾验证报告和截图：本机 `/tmp/lt-real/public-final-result.json`、`42-public-final-desktop.png`、`43-public-final-dark.png`、`44-public-final-mobile-chat.png`、`45-public-final-mobile-home.png`（临时验证产物，不随仓库提交）
