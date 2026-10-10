@@ -147,11 +147,15 @@ export async function generate(type = 'normal', opt = {}) {
 
     const preset = state.preset.data;
     const params = samplerParams(preset);
-    // 发送前最后一次给脚本改请求的机会（合并相邻消息、改采样参数之类的预设脚本靠这个事件）
+    // 发送前给脚本改请求的两次机会，顺序和酒馆一样：先 GENERATE_AFTER_DATA（{prompt: 消息数组}），再
+    // CHAT_COMPLETION_SETTINGS_READY（消息 + 采样参数）。合并相邻消息、加前缀之类的预设脚本靠它们；
+    // 新版酒馆（> 1.13.4）上这类脚本只听前一个，所以两个都要在拼请求体之前发，改动才算数
+    const afterData = { prompt: prompt.messages };
+    await eventSource.emit(event_types.GENERATE_AFTER_DATA, afterData, false);
+    if (Array.isArray(afterData.prompt)) prompt.messages = afterData.prompt;
     const genData = await settingsReady(conn, params, prompt.messages, session.names);
     prompt.messages = genData.messages;
     const req = buildRequest(conn, { messages: prompt.messages, prefill: prompt.prefill, params, names: session.names });
-    await eventSource.emit(event_types.GENERATE_AFTER_DATA, { prompt: prompt.messages }, false);
 
     // 准备写入位置
     if (type === 'normal') {
@@ -470,6 +474,8 @@ export async function scriptGenerate(config = {}, { raw = false } = {}) {
         if (typeof v === 'number') params[k] = v;
     }
     const stream = !!cfg.should_stream;
+    // 脚本发起的请求同样经过 CHAT_COMPLETION_SETTINGS_READY（酒馆里所有对话补全请求都会）
+    messages = (await settingsReady(conn, params, messages, session?.names)).messages;
     const req = buildRequest({ ...conn, stream }, { messages, prefill, params, names: session?.names ?? { user: 'User', char: 'Assistant' } });
 
     const ac = new AbortController();

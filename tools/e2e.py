@@ -694,7 +694,8 @@ def main():
             texts = [m['content'] for m in req]
             assert texts[-1] == '预设脚本加的一句', texts[-3:]
             assert any('注入的提示词' in t for t in texts), '脚本 injectPrompts 注入的提示词没进请求'
-            assert texts[0].startswith('脚本预设的主提示词'), texts[0][:40]
+            assert texts[0] == '生成数据事件加的一句', f'脚本在 GENERATE_AFTER_DATA 里换掉的消息数组没生效：{texts[0][:40]}'
+            assert texts[1].startswith('脚本预设的主提示词'), texts[1][:40]
             # 脚本放进“扩展设置”的界面在脚本面板里能看到、能展开
             right_tab('脚本')
             assert_in('预设「脚本预设」的脚本（2 个）', page.locator('#right .panel-body').inner_text(), '脚本面板')
@@ -716,7 +717,7 @@ def main():
             assert page.locator('#e2e-float').count() == 1
             send('再说一句')
             texts = [m['content'] for m in mock('/last')['body']['messages']]
-            assert not any('预设脚本加的一句' in t or '注入的提示词' in t for t in texts), '预设脚本停了它的改动还在生效'
+            assert not any('预设脚本加的一句' in t or '注入的提示词' in t or '生成数据事件' in t for t in texts), '预设脚本停了它的改动还在生效'
         run('脚本：预设自带的脚本随预设起停，能改请求、注入提示词、放自己的设置界面', preset_scripts)
 
         def script_reload():
