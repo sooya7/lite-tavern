@@ -152,14 +152,43 @@ export function saveSettings({ now = false } = {}) {
     if (now) return _saveSettings.flush();
 }
 
-const _saveChat = debounce(async () => {
+let chatWrites = Promise.resolve();
+let chatConflictHandler = null;
+/** 聊天在别处（酒馆、另一个窗口）被改过、这边存不进去时找谁问用户。界面层来注册，这里不碰界面 */
+export function onChatConflict(fn) {
+    chatConflictHandler = fn;
+}
+
+/**
+ * 把一个聊天写到磁盘。写入排成一队，一次只发一个：每次都要带上一次写完拿到的版本号，
+ * 服务端靠它判断磁盘上的内容是不是已经被别处改过。
+ * chat.conflict 为真时不再自动写（等用户选“载入最新的”还是“覆盖”），force 强行覆盖。
+ */
+export function writeChat(charId, chat, { force = false } = {}) {
+    const run = async () => {
+        if (chat.conflict && !force) return;
+        try {
+            const r = await api.saveChat(charId, chat.name, serializeChat(chat.header, chat.messages), { expect: chat.version ?? '', force });
+            chat.version = r?.version ?? '';
+            chat.conflict = false;
+        } catch (e) {
+            if (e.code === 'chat-conflict') {
+                chat.conflict = true;
+                if (chatConflictHandler) chatConflictHandler(chat, charId);
+                else toast('这个聊天在别处被改过了，这里的修改没有保存', 'error');
+            } else {
+                toast(`聊天保存失败：${e.message}`, 'error');
+            }
+        }
+    };
+    chatWrites = chatWrites.then(run, run);
+    return chatWrites;
+}
+
+const _saveChat = debounce(() => {
     const c = state.chat;
-    if (!c || !state.char) return;
-    try {
-        await api.saveChat(state.char.id, c.name, serializeChat(c.header, c.messages));
-    } catch (e) {
-        toast(`聊天保存失败：${e.message}`, 'error');
-    }
+    if (!c || !state.char) return undefined;
+    return writeChat(state.char.id, c);
 }, 400);
 
 export function saveChat({ now = false } = {}) {

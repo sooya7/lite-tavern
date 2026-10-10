@@ -271,7 +271,7 @@ export async function renameChat(c) {
 
 export async function exportChat(c) {
     try {
-        const text = await api.getChat(state.char.id, c.name);
+        const { text } = await api.getChat(state.char.id, c.name);
         downloadText(text, `${c.name}.jsonl`, 'application/jsonl');
     } catch (e) {
         toast(`导出失败：${e.message}`, 'error');

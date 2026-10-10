@@ -35,9 +35,10 @@ export class Router {
 }
 
 export class HttpError extends Error {
-    constructor(status, message) {
+    constructor(status, message, code = '') {
         super(message);
         this.status = status;
+        this.code = code; // 给前端分辨“同是 409 但原因不同”用，可为空
     }
 }
 

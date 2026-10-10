@@ -96,6 +96,8 @@ export const FEATURES = [
     // ---- 通用 › 导入
     { t: '导入文件（角色卡 / 预设 / 世界书 / 正则 / 聊天）', tab: 'import', find: '导入文件', k: 'png json jsonl 导入角色卡 上传' },
     { t: '从酒馆搬数据', tab: 'import', find: '从酒馆数据目录导入', k: 'sillytavern 迁移 搬家 批量 酒馆导入' },
+    { t: '导入酒馆里的 API 连接', tab: 'import', find: '从酒馆数据目录导入', k: 'luker sillytavern 连接配置 key 密钥 迁移 接口' },
+    { t: '与酒馆共用数据', tab: 'import', find: '与酒馆共用数据', k: 'luker sillytavern 共享 同一份 数据目录 同步' },
 
     // ---- 面板外的动作
     { t: '新聊天', action: 'newChat', k: '开新聊天 new chat 重开' },

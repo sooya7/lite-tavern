@@ -34,6 +34,8 @@ const config = {
     host: String(args.host ?? process.env.LT_HOST ?? '127.0.0.1'),
     data: path.resolve(String(args.data ?? process.env.LT_DATA ?? path.join(ROOT, 'data'))),
     password: args.password ?? process.env.LT_PASSWORD ?? '',
+    // 酒馆（SillyTavern / Luker）的用户数据目录：填了就和它共用角色卡、聊天、世界书、预设
+    stData: String(args['st-data'] ?? process.env.LT_ST_DATA ?? ''),
     open: !!args.open,
 };
 
@@ -43,7 +45,13 @@ if (!isLocalHost && !config.password) {
     process.exit(1);
 }
 
-const store = new Store(config.data);
+let store;
+try {
+    store = new Store(config.data, { stData: config.stData });
+} catch (e) {
+    console.error(e.message);
+    process.exit(1);
+}
 const router = new Router();
 const sessionToken = config.password ? crypto.createHash('sha256').update(`${config.password}|${config.data}`).digest('hex') : '';
 
@@ -56,7 +64,7 @@ function isAuthed(req) {
 }
 
 // ---------- 状态 ----------
-router.get('/api/ping', async () => ({ ok: true, version: '0.1.0', data: config.data, auth: !!config.password }));
+router.get('/api/ping', async () => ({ ok: true, version: '0.1.0', data: config.data, shared: store.stData, auth: !!config.password }));
 
 router.post('/api/login', async (req, res) => {
     const { password } = await readJson(req);
@@ -143,15 +151,22 @@ router.get('/api/characters/:file/export', async (req, res, { file }) => {
 // ---------- 聊天 ----------
 router.get('/api/chats/:char', async (req, res, { char }) => store.listChats(char));
 router.get('/api/chats/:char/:name', async (req, res, { char, name }) => {
-    sendText(res, 200, await store.readChat(char, name), 'application/jsonl; charset=utf-8');
+    // 先取版本号再读内容：中间要是被别处改了，前端拿到的版本号偏旧，下次保存会被拦下来（宁可多问一次）
+    const version = await store.chatVersion(char, name);
+    const text = await store.readChat(char, name);
+    res.setHeader('X-Chat-Version', version);
+    sendText(res, 200, text, 'application/jsonl; charset=utf-8');
     return undefined;
 });
 router.put('/api/chats/:char/:name', async (req, res, { char, name }) => {
     const text = (await readBody(req)).toString('utf8');
     const first = text.slice(0, text.indexOf('\n') > 0 ? text.indexOf('\n') : undefined);
     try { JSON.parse(first); } catch { throw new HttpError(400, '聊天格式不对'); }
-    await store.saveChat(char, name, text);
-    return { ok: true };
+    const version = await store.saveChat(char, name, text, {
+        expect: String(req.headers['x-chat-expect'] ?? ''),
+        force: req.headers['x-chat-force'] === '1',
+    });
+    return { ok: true, version };
 });
 router.post('/api/chats/:char/:name/rename', async (req, res, { char, name }) => {
     const { to } = await readJson(req);
@@ -200,8 +215,8 @@ router.post('/api/llm/:conn', async (req, res, { conn }) => {
 });
 
 // ---------- 酒馆导入 ----------
-router.get('/api/st/detect', async () => detectStDirs());
-router.post('/api/st/scan', async (req) => scanStDir((await readJson(req)).dir));
+router.get('/api/st/detect', async () => [...new Set([store.stData, ...detectStDirs()].filter(Boolean))]);
+router.post('/api/st/scan', async (req) => scanStDir((await readJson(req)).dir, store));
 router.post('/api/st/import', async (req) => importFromSt(store, await readJson(req)));
 
 // ---------- 服务 ----------
@@ -225,7 +240,7 @@ const server = http.createServer(async (req, res) => {
     } catch (e) {
         const status = e.status ?? 500;
         if (status >= 500) console.error(e);
-        if (!res.headersSent) sendJson(res, status, { error: { message: e.message ?? String(e) } });
+        if (!res.headersSent) sendJson(res, status, { error: { message: e.message ?? String(e), ...(e instanceof HttpError && e.code ? { code: e.code } : {}) } });
         else res.end();
     }
 });
@@ -234,6 +249,7 @@ server.listen(config.port, config.host, () => {
     const url = `http://${config.host === '0.0.0.0' ? '127.0.0.1' : config.host}:${config.port}`;
     console.log(`轻酒馆已启动：${url}`);
     console.log(`数据目录：${config.data}`);
+    if (store.stData) console.log(`角色卡、聊天、世界书、预设与酒馆共用：${store.stData}`);
     if (!isLocalHost) console.log('已开启访问密码（局域网/手机访问时输入）');
     if (config.open) {
         const cmd = process.platform === 'win32' ? `start "" "${url}"` : process.platform === 'darwin' ? `open "${url}"` : `xdg-open "${url}"`;

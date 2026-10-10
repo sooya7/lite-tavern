@@ -21,7 +21,8 @@ import { toWorldbook, fromWorldbook, toHelperPreset, fromHelperPreset, toTavernR
 import { ChatSession } from '../public/js/core/session.js';
 import { normalizeCard } from '../public/js/core/card.js';
 import { normalizeWorld } from '../public/js/core/worldinfo.js';
-import { Store } from '../server/store.mjs';
+import { Store, stampIntegrity } from '../server/store.mjs';
+import { readStConnections, importFromSt, scanStDir } from '../server/st-import.mjs';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -576,5 +577,200 @@ test('导入角色卡：内嵌世界书另存并绑定，脚本原样留在卡�
         assert.equal(Object.values((await store.readJson('worlds', '卡里的世界书')).entries)[0].content, '我改过了');
     } finally {
         fs.rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+// ---------- 与酒馆共用数据目录 ----------
+
+/** 造一个最小的酒馆用户数据目录 */
+function fakeStDir(base) {
+    const st = path.join(base, 'st');
+    for (const d of ['characters', 'chats/小明', 'worlds', 'OpenAI Settings', 'User Avatars']) fs.mkdirSync(path.join(st, d), { recursive: true });
+    return st;
+}
+const chatText = (integrity, ...mes) => [JSON.stringify({ user_name: 'U', character_name: '小明', chat_metadata: { integrity, note_prompt: '备注' } }), ...mes.map(m => JSON.stringify({ name: '小明', mes: m }))].join('\n') + '\n';
+
+test('共用酒馆数据：四类内容读写酒馆目录，设置和回收站留在自己这边', async () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'lt-shared-'));
+    try {
+        const st = fakeStDir(base);
+        const own = path.join(base, 'own');
+        fs.writeFileSync(path.join(st, 'settings.json'), '{"main_api":"openai"}');
+        fs.writeFileSync(path.join(st, 'OpenAI Settings', '酒馆预设.json'), '{"temperature":1,"酒馆独有":true}');
+        fs.writeFileSync(path.join(st, 'worlds', '酒馆世界书.json'), JSON.stringify({ entries: { 0: { uid: 0, key: ['a'], content: 'x', 酒馆独有字段: 7 } }, 顶层独有: 1 }));
+        const store = new Store(own, { stData: st });
+
+        assert.deepEqual((await store.listJson('presets')).map(x => x.name), ['酒馆预设']);
+        await store.saveJson('presets', '这边新建的', { temperature: 0.5 });
+        assert.ok(fs.existsSync(path.join(st, 'OpenAI Settings', '这边新建的.json')));
+        assert.ok(!fs.existsSync(path.join(own, 'presets')), '共用的种类不在自己目录里另建一份');
+
+        // 世界书存回去不丢酒馆那边的字段
+        const w = await store.readJson('worlds', '酒馆世界书');
+        await store.saveJson('worlds', '酒馆世界书', w);
+        const back = JSON.parse(fs.readFileSync(path.join(st, 'worlds', '酒馆世界书.json'), 'utf8'));
+        assert.equal(back.顶层独有, 1);
+        assert.equal(back.entries[0].酒馆独有字段, 7);
+
+        // 角色卡写进酒馆的 characters，顶层字段（酒馆记“当前聊天”的 chat 等）保留
+        const { file } = await store.importCard(Buffer.from(JSON.stringify({ spec: 'chara_card_v2', data: { name: '小红' }, chat: '小红 - 旧聊天', create_date: '2026-01-01' })), '小红.json');
+        assert.ok(fs.existsSync(path.join(st, 'characters', file)));
+        const card = await store.saveCard(file, await store.readCard(file));
+        assert.equal(card.chat, '小红 - 旧聊天');
+        assert.equal(card.create_date, '2026-01-01');
+
+        // 设置各存各的：酒馆的 settings.json 一个字都不动
+        await store.saveSettings({ connections: [] });
+        assert.equal(fs.readFileSync(path.join(st, 'settings.json'), 'utf8'), '{"main_api":"openai"}');
+        assert.ok(fs.existsSync(path.join(own, 'settings.json')));
+
+        // 删除进自己的回收站
+        await store.deleteJson('worlds', '酒馆世界书');
+        assert.ok(!fs.existsSync(path.join(st, 'worlds', '酒馆世界书.json')));
+        assert.ok(fs.readdirSync(path.join(own, 'trash')).some(f => f.endsWith('worlds__酒馆世界书.json')));
+
+        assert.throws(() => store.p('characters', '..', 'settings.json'), /越界/);
+        assert.throws(() => new Store(own, { stData: path.join(base, '不存在') }), /不像酒馆/);
+        assert.throws(() => new Store(st, { stData: st }), /不能互相包含/);
+    } finally {
+        fs.rmSync(base, { recursive: true, force: true });
+    }
+});
+
+test('共用酒馆数据：聊天被别处改过会拦下来，每次保存换校验标记，附属文件跟着走', async () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'lt-shared-'));
+    try {
+        const st = fakeStDir(base);
+        const own = path.join(base, 'own');
+        const dir = path.join(st, 'chats', '小明');
+        const file = path.join(dir, '聊天一.jsonl');
+        fs.writeFileSync(file, chatText('酒馆的标记', '你好'));
+        fs.writeFileSync(path.join(dir, '聊天一.luker-state.chat_sync.json'), JSON.stringify({ integrity: '酒馆的标记', updated_at: 1 }));
+        fs.writeFileSync(path.join(dir, '聊天一.luker-state.memory_graph__meta.json'), '{"节点":3}');
+        const store = new Store(own, { stData: st });
+        const headerOf = () => JSON.parse(fs.readFileSync(file, 'utf8').split('\n')[0]);
+        const sidecar = () => JSON.parse(fs.readFileSync(path.join(dir, '聊天一.luker-state.chat_sync.json'), 'utf8'));
+
+        // 只是读，不动文件
+        const v0 = await store.chatVersion('小明', '聊天一');
+        const loaded = await store.readChat('小明', '聊天一');
+        assert.equal(headerOf().chat_metadata.integrity, '酒馆的标记');
+
+        // 这边保存：标记换新的，聊天第一行和 Luker 旁边那个文件一致，其余内容不变
+        const v1 = await store.saveChat('小明', '聊天一', loaded + JSON.stringify({ name: 'U', mes: '在吗' }) + '\n', { expect: v0 });
+        assert.notEqual(v1, v0);
+        const mark = headerOf().chat_metadata.integrity;
+        assert.notEqual(mark, '酒馆的标记');
+        assert.equal(sidecar().integrity, mark);
+        assert.equal(headerOf().chat_metadata.note_prompt, '备注');
+        assert.equal(fs.readFileSync(file, 'utf8').trim().split('\n').length, 3);
+
+        // 酒馆那边又写了一笔（内容变了）→ 这边拿旧版本号保存被拦
+        fs.writeFileSync(file, fs.readFileSync(file, 'utf8') + JSON.stringify({ name: '小明', mes: '酒馆里回的' }) + '\n');
+        await assert.rejects(store.saveChat('小明', '聊天一', chatText('x', '这边的旧内容'), { expect: v1 }), (e) => e.status === 409 && e.code === 'chat-conflict');
+        assert.ok(fs.readFileSync(file, 'utf8').includes('酒馆里回的'), '被拦下来就不能写');
+
+        // 用户选了覆盖：先留备份再写
+        const v2 = await store.saveChat('小明', '聊天一', chatText('x', '这边的内容'), { expect: v1, force: true });
+        assert.ok(fs.readFileSync(file, 'utf8').includes('这边的内容'));
+        const backups = fs.readdirSync(path.join(own, 'backups', 'chats', '小明'));
+        assert.ok(backups.some(f => fs.readFileSync(path.join(own, 'backups', 'chats', '小明', f), 'utf8').includes('酒馆里回的')), '覆盖前的内容在备份里');
+        assert.equal(await store.chatVersion('小明', '聊天一'), v2);
+        // 没带版本号（新建聊天）不检查
+        await store.saveChat('小明', '新聊天', chatText('', '开场白'));
+        assert.ok(!fs.existsSync(path.join(dir, '新聊天.luker-state.chat_sync.json')), 'Luker 没建过的附属文件不替它建');
+
+        // 改名、删除：附属文件跟着走
+        await store.renameChat('小明', '聊天一', '聊天二');
+        assert.deepEqual(fs.readdirSync(dir).filter(f => f.startsWith('聊天')).sort(), ['聊天二.jsonl', '聊天二.luker-state.chat_sync.json', '聊天二.luker-state.memory_graph__meta.json']);
+        assert.deepEqual((await store.listChats('小明')).map(c => c.name).sort(), ['新聊天', '聊天二']);
+        await store.deleteChat('小明', '聊天二');
+        assert.deepEqual(fs.readdirSync(dir), ['新聊天.jsonl']);
+        assert.equal(fs.readdirSync(path.join(own, 'trash')).filter(f => f.includes('聊天二')).length, 3);
+
+        // 不共用时聊天原样落盘，一个字节都不改
+        const plain = new Store(path.join(base, 'plain'));
+        const text = chatText('原来的', '你好');
+        const pv = await plain.saveChat('小明', 'a', text);
+        assert.equal(await plain.readChat('小明', 'a'), text);
+        await assert.rejects(plain.saveChat('小明', 'a', text, { expect: 'x-1' }), (e) => e.code === 'chat-conflict');
+        assert.equal(await plain.saveChat('小明', 'a', text, { expect: pv }), await plain.chatVersion('小明', 'a'));
+
+        // 第一行不是聊天头（老格式）就不动
+        assert.equal(stampIntegrity('{"name":"a","mes":"b"}\n').integrity, '');
+        assert.equal(stampIntegrity('不是 JSON\n').text, '不是 JSON\n');
+    } finally {
+        fs.rmSync(base, { recursive: true, force: true });
+    }
+});
+
+test('从酒馆导入 API 连接：连接配置和 Key 一起搬，认得出已有的，不支持的说明跳过', async () => {
+    const st = {
+        main_api: 'openai',
+        proxies: [{ name: 'None', url: '', password: '' }, { name: '我的代理', url: 'https://proxy.example/v1/', password: 'proxy-pass' }],
+        oai_settings: { chat_completion_source: 'custom', custom_url: 'https://a.example/v1', custom_model: 'm-a', custom_prompt_post_processing: 'strict_tools' },
+        extension_settings: { connectionManager: { profiles: [
+            { id: 'p1', name: '中转A', mode: 'cc', api: 'custom', 'api-url': 'https://a.example/v1/', model: 'm-a', 'secret-id': 's2' },
+            { id: 'p2', name: '官方DS', mode: 'cc', api: 'deepseek', model: 'deepseek-x', 'prompt-post-processing': 'merge' },
+            { id: 'p3', name: 'Claude代理', mode: 'cc', api: 'claude', model: 'claude-x', proxy: '我的代理' },
+            { id: 'p4', name: '文本补全', mode: 'tc', api: 'koboldcpp' },
+            { id: 'p5', name: '怪来源', mode: 'cc', api: 'vertexai', model: 'g' },
+            { id: 'p6', name: '没地址', mode: 'cc', api: 'custom', model: 'x' },
+            { id: 'p7', name: '没Key', mode: 'cc', api: 'custom', 'api-url': 'http://127.0.0.1:1/v1', model: 'local', 'secret-id': '不存在' },
+        ] } },
+    };
+    const secrets = { api_key_custom: [{ id: 's1', value: 'key-1', active: true }, { id: 's2', value: 'key-2', active: false }], api_key_deepseek: 'ds-key', api_key_claude: [{ id: 'c1', value: 'claude-key', active: true }] };
+    const { list, skipped } = readStConnections(st, secrets);
+    assert.deepEqual(list.map(c => [c.name, c.provider, c.baseUrl, c.model, c.postProcessing, c.key]), [
+        ['中转A', 'openai', 'https://a.example/v1', 'm-a', 'strict', 'key-2'],
+        ['官方DS', 'openai', 'https://api.deepseek.com/v1', 'deepseek-x', 'merge', 'ds-key'],
+        ['Claude代理', 'claude', 'https://proxy.example', 'claude-x', 'strict', 'proxy-pass'],
+        ['没Key', 'openai', 'http://127.0.0.1:1/v1', 'local', 'strict', ''],
+    ]);
+    assert.equal(skipped.length, 3);
+    // 没有连接配置时取当前正在用的那个
+    const cur = readStConnections({ main_api: 'openai', oai_settings: st.oai_settings }, { api_key_custom: 'old-style-key' }).list;
+    assert.deepEqual(cur.map(c => [c.name, c.baseUrl, c.model, c.key]), [['酒馆当前连接', 'https://a.example/v1', 'm-a', 'old-style-key']]);
+
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'lt-conn-'));
+    try {
+        const dir = fakeStDir(base);
+        fs.writeFileSync(path.join(dir, 'settings.json'), JSON.stringify(st));
+        fs.writeFileSync(path.join(dir, 'secrets.json'), JSON.stringify(secrets));
+        fs.writeFileSync(path.join(dir, 'characters', '别拷我.json'), JSON.stringify({ data: { name: '别拷我' } }));
+        const store = new Store(path.join(base, 'own'), { stData: dir });
+        // 之前手动建过一条同地址同模型的：认它，不重复建，名字和 Key 不动
+        await store.saveSettings({ connections: [{ id: 'c_old', name: '我自己起的名字', provider: 'openai', baseUrl: 'https://a.example/v1', model: 'm-a' }], activeConnection: 'c_old' });
+        await store.setSecret('c_old', '我自己填的');
+        const scan = await scanStDir(dir, store);
+        assert.equal(scan.shared, true);
+        assert.equal(scan.connectionCount, 4);
+
+        const r = await importFromSt(store, { dir, characters: ['别拷我.json'], connections: true });
+        assert.deepEqual(r.characters, [], '源目录就是共用目录时不拷角色卡');
+        assert.deepEqual(r.connections, ['官方DS', 'Claude代理', '没Key（酒馆里没存 Key）']);
+        const s1 = await store.getSettings();
+        assert.deepEqual(s1.connections.map(c => c.name), ['我自己起的名字', '官方DS', 'Claude代理', '没Key']);
+        assert.equal(s1.connections[0].stProfile, 'p1');
+        assert.equal(s1.activeConnection, 'c_old');
+        const sec = await store.getSecrets();
+        assert.equal(sec.c_old, '我自己填的');
+        assert.equal(sec[s1.connections[1].id], 'ds-key');
+        assert.equal(sec[s1.connections[2].id], 'proxy-pass');
+        assert.ok(!(s1.connections[3].id in sec));
+        assert.ok(s1.connections.every(c => !('key' in c)), 'Key 不进 settings.json');
+
+        // 再导一次不重复；勾了“也按酒馆的更新”才覆盖
+        const r2 = await importFromSt(store, { dir, connections: true });
+        assert.deepEqual(r2.connections, []);
+        assert.equal((await store.getSettings()).connections.length, 4);
+        const r3 = await importFromSt(store, { dir, connections: true, overwrite: true });
+        assert.equal(r3.connections.length, 4);
+        const s3 = await store.getSettings();
+        assert.equal(s3.connections.length, 4);
+        assert.equal(s3.connections[0].name, '中转A');
+        assert.equal((await store.getSecrets()).c_old, 'key-2');
+    } finally {
+        fs.rmSync(base, { recursive: true, force: true });
     }
 });

@@ -18,7 +18,12 @@ async function request(method, url, body, { raw = false, headers = {} } = {}) {
     const text = await res.text();
     let data;
     try { data = text ? JSON.parse(text) : null; } catch { data = text; }
-    if (!res.ok) throw new Error(data?.error?.message ?? `请求失败 ${res.status}`);
+    if (!res.ok) {
+        const err = new Error(data?.error?.message ?? `请求失败 ${res.status}`);
+        err.status = res.status;
+        err.code = data?.error?.code ?? '';
+        throw err;
+    }
     return data;
 }
 
@@ -45,8 +50,19 @@ export const api = {
     exportCharacterUrl: (file, format) => `/api/characters/${enc(file)}/export?format=${format}`,
 
     listChats: (charId) => request('GET', `/api/chats/${enc(charId)}`),
-    getChat: async (charId, name) => (await request('GET', `/api/chats/${enc(charId)}/${enc(name)}`, undefined, { raw: true })).text(),
-    saveChat: (charId, name, text) => request('PUT', `/api/chats/${enc(charId)}/${enc(name)}`, text, { headers: { 'Content-Type': 'application/jsonl' } }),
+    /** @returns {Promise<{text: string, version: string}>} version 是这份内容的版本号，保存时带回去 */
+    getChat: async (charId, name) => {
+        const res = await request('GET', `/api/chats/${enc(charId)}/${enc(name)}`, undefined, { raw: true });
+        if (!res.ok) throw new Error(`读不到聊天（${res.status}）`);
+        return { text: await res.text(), version: res.headers.get('X-Chat-Version') ?? '' };
+    },
+    /**
+     * expect：读这个聊天时拿到的版本号。磁盘上的已经被别处改过就会失败（err.code === 'chat-conflict'），force 强行覆盖。
+     * @returns {Promise<{ok: boolean, version: string}>}
+     */
+    saveChat: (charId, name, text, { expect = '', force = false } = {}) => request('PUT', `/api/chats/${enc(charId)}/${enc(name)}`, text, {
+        headers: { 'Content-Type': 'application/jsonl', ...(expect ? { 'X-Chat-Expect': expect } : {}), ...(force ? { 'X-Chat-Force': '1' } : {}) },
+    }),
     renameChat: (charId, name, to) => request('POST', `/api/chats/${enc(charId)}/${enc(name)}/rename`, { to }),
     deleteChat: (charId, name) => request('DELETE', `/api/chats/${enc(charId)}/${enc(name)}`),
 

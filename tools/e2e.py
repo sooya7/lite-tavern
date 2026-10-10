@@ -3,6 +3,9 @@
 # 不需要外网：脚本要从 jsdelivr 取的 zod 和 MVU 变量结构库在这里用下面的替身顶上（真库要联网，另行在部署环境验证）。
 # 用法：先起 mock（node tools/mock-llm.mjs 8799）和服务（node server.mjs --port 8731 --data <空目录>），再
 #   python tools/e2e.py
+# 想连“与酒馆共用数据”一起测：node tools/fake-st-dir.mjs <目录> 造一个假的酒馆数据目录，另起一个实例
+#   node server.mjs --port 8732 --data <另一个空目录> --st-data <目录>
+# 再带上 LT_SHARED_URL=http://127.0.0.1:8732 LT_SHARED_DIR=<目录> LT_SHARED_OWN=<另一个空目录> 跑。
 import json
 import os
 import sys
@@ -17,6 +20,10 @@ SHOTS = os.environ.get('LT_SHOTS', os.path.join(os.environ.get('TEMP', '/tmp'), 
 FIXTURE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures', 'test-card.json')
 SCRIPT_CARD = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures', 'script-card.json')
 SCRIPT_PRESET = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures', 'script-preset.json')
+# 共用酒馆数据目录的那几项：另起一个带 --st-data 的实例，三个都给了才跑
+SHARED_URL = os.environ.get('LT_SHARED_URL', '')
+SHARED_DIR = os.environ.get('LT_SHARED_DIR', '')  # 假的酒馆用户数据目录
+SHARED_OWN = os.environ.get('LT_SHARED_OWN', '')  # 那个实例自己的数据目录
 
 # zod 的替身：只实现脚本测试卡用到的那几个写法（object / string / coerce.number / transform / prefault / safeParse）
 FAKE_ZOD = r'''
@@ -786,6 +793,112 @@ def main():
             mctx.close()
         run('手机布局（390px）', mobile)
 
+        # ---------- 与酒馆共用数据目录（另起的一个实例：--st-data 指向一个假的酒馆目录） ----------
+        if SHARED_URL and SHARED_DIR:
+            sctx = browser.new_context(viewport={'width': 1440, 'height': 900}, locale='zh-CN')
+            offline_cdn(sctx)
+            sp = sctx.new_page()
+            sp.on('console', lambda m: errors.append(f'[共用] console.{m.type}: {m.text}') if m.type in ('error',) else None)
+            sp.on('pageerror', lambda e: errors.append(f'[共用] pageerror: {e}'))
+            st_file = lambda *parts: os.path.join(SHARED_DIR, *parts)
+            chat_files = lambda: [os.path.join(r, f) for r, _, fs in os.walk(st_file('chats')) for f in fs if f.endswith('.jsonl')]
+
+            def shared_import_settings():
+                sp.goto(SHARED_URL + '/')
+                sp.wait_for_selector('#composer textarea', state='attached')
+                right_tab('导入', sp)
+                sp.wait_for_selector('#right >> text=与酒馆共用数据')
+                assert_in(SHARED_DIR, sp.locator('#right .panel-body').inner_text(), '导入面板')
+                sp.locator('#right button', has_text=SHARED_DIR).click()
+                sp.wait_for_selector('#right >> text=这就是正在共用的目录')
+                assert sp.locator('#right >> text=API 连接和 Key（1 个）').is_visible()
+                assert sp.locator('#right summary', has_text='角色卡').count() == 0, '共用目录不该再列角色卡让人导入'
+                sp.locator('#right button', has_text='开始导入').click()
+                sp.wait_for_selector('#right >> text=完成：连接 1')
+                right_tab('连接', sp)
+                sp.wait_for_selector('#right input[type=password][placeholder^="已保存"]')
+                assert sp.locator('#right .panel-body input.input').first.input_value() == '酒馆里的中转' or '酒馆里的中转' in sp.locator('#right .panel-body').inner_text()
+                # 酒馆自己的设置和密钥文件一个字都没被动过
+                assert json.load(open(st_file('settings.json'), encoding='utf-8'))['main_api'] == 'openai'
+                assert 'sk-from-tavern' in open(st_file('secrets.json'), encoding='utf-8').read()
+                sp.screenshot(path=os.path.join(SHOTS, '20-shared-import.png'))
+            run('共用：导入面板说明共用目录，只把连接和 Key 搬过来', shared_import_settings)
+
+            def shared_card_and_chat():
+                right_tab('导入', sp)
+                with sp.expect_file_chooser() as fc:
+                    sp.locator('#right button', has_text='选择文件').click()
+                fc.value.set_files(FIXTURE)
+                sp.wait_for_selector('#chat .mes')
+                cards = [f for f in os.listdir(st_file('characters')) if f.endswith('.png')]
+                assert len(cards) == 1, f'角色卡应该落在酒馆的 characters 里：{cards}'
+                assert len(os.listdir(st_file('worlds'))) == 1, '内嵌世界书应该落在酒馆的 worlds 里'
+                sp.fill('#send_textarea', '共用目录里的第一句')
+                sp.click('#send_but')
+                sp.wait_for_function("() => !document.querySelector('#send_but.stop')", timeout=40000)
+                sp.wait_for_timeout(900)
+                files = chat_files()
+                assert len(files) == 1, f'聊天应该落在酒馆的 chats 里：{files}'
+                lines = open(files[0], encoding='utf-8').read().strip().split('\n')
+                assert json.loads(lines[0])['chat_metadata'].get('integrity'), '共用模式下聊天头要带校验标记'
+                assert len(lines) >= 4, f'开场白 + 一问一答：{len(lines)} 行'
+                assert '共用目录里的第一句' in lines[2]
+            run('共用：导入的卡、世界书和新聊天都落在酒馆目录里，用搬过来的连接能聊', shared_card_and_chat)
+
+            def tavern_writes(text):
+                """装作酒馆那边又聊了一句：直接往聊天文件后面加一行"""
+                f = chat_files()[0]
+                with open(f, 'a', encoding='utf-8') as fh:
+                    fh.write(json.dumps({'name': '测试角色', 'is_user': False, 'mes': text, 'send_date': '2026-10-10T00:00:00.000Z'}, ensure_ascii=False) + '\n')
+                return f
+
+            def edit_first(text):
+                first = sp.locator('#chat .mes').first
+                first.hover()
+                first.locator('button[title="编辑"]').click()
+                sp.locator('#chat .mes-edit textarea').fill(text)
+                sp.locator('#chat .mes-edit button', has_text='保存').click()
+
+            def shared_conflict():
+                f = tavern_writes('酒馆那边回的一句')
+                edit_first('这边改的开场白')
+                sp.wait_for_selector('.modal >> text=这个聊天在别处被改过了')
+                sp.screenshot(path=os.path.join(SHOTS, '21-shared-conflict.png'))
+                assert '这边改的开场白' not in open(f, encoding='utf-8').read(), '被拦下来就不能写进去'
+                sp.locator('.modal-foot button', has_text='载入最新的').click()
+                sp.wait_for_function("() => document.querySelector('#chat')?.innerText.includes('酒馆那边回的一句')")
+                assert '这边改的开场白' not in sp.locator('#chat').inner_text(), '载入最新的之后这边没保存的修改应该作废'
+                # 载入之后拿到的是新版本号，正常修改能存进去
+                edit_first('载入之后再改')
+                sp.wait_for_timeout(1200)
+                assert sp.locator('.modal').count() == 0, '没有别处的改动时不该弹窗'
+                assert '载入之后再改' in open(f, encoding='utf-8').read()
+
+                # 再来一次，这回选覆盖
+                tavern_writes('酒馆那边的第二句')
+                edit_first('坚持用这边的')
+                sp.wait_for_selector('.modal >> text=这个聊天在别处被改过了')
+                sp.locator('.modal-foot button', has_text='用这边的覆盖').click()
+                sp.wait_for_function("() => !document.querySelector('.modal')")
+                sp.wait_for_timeout(600)
+                text = open(f, encoding='utf-8').read()
+                assert '坚持用这边的' in text and '酒馆那边的第二句' not in text, '覆盖后磁盘上应该是这边的内容'
+                backups = [os.path.join(r, x) for r, _, fs in os.walk(os.path.join(SHARED_OWN, 'backups')) for x in fs]
+                assert any('酒馆那边的第二句' in open(b, encoding='utf-8').read() for b in backups), '被覆盖的内容应该留在备份里'
+                # 关掉弹窗不选 = 先不管，下次保存再问
+                tavern_writes('第三句')
+                edit_first('先不管')
+                sp.wait_for_selector('.modal >> text=这个聊天在别处被改过了')
+                sp.keyboard.press('Escape')
+                sp.wait_for_function("() => !document.querySelector('.modal')")
+                assert '先不管' not in open(f, encoding='utf-8').read()
+                edit_first('再改一次')
+                sp.wait_for_selector('.modal >> text=这个聊天在别处被改过了')
+                sp.locator('.modal-foot button', has_text='用这边的覆盖').click()
+                sp.wait_for_function("() => !document.querySelector('.modal')")
+            run('共用：聊天被酒馆改过时拦下来问，载入最新 / 覆盖（留备份）/ 先不管都对', shared_conflict)
+            sctx.close()
+
         browser.close()
 
     print('\n==== 结果 ====')
@@ -796,7 +909,8 @@ def main():
             print(f'      {r[2]}')
     print(f'\n通过 {ok}/{len(results)}；截图在 {SHOTS}')
     # 本来就会有的几种：429 重试测试；脚本测试卡里故意出错的那个脚本；被掐掉的 jsdelivr 请求（图标字体）
-    errors[:] = [e for e in errors if 'status of 429' not in e and '故意出错' not in e and 'net::ERR_FAILED' not in e]
+    # 共用那几项里的 409 是故意造出来的“聊天被别处改过”
+    errors[:] = [e for e in errors if 'status of 429' not in e and '故意出错' not in e and 'net::ERR_FAILED' not in e and not ('[共用]' in e and 'status of 409' in e)]
     if errors:
         print(f'\n浏览器报错 {len(errors)} 条：')
         for e in errors[:30]:
