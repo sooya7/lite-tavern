@@ -8,7 +8,7 @@ import { buildChatCompletion, PERSONA_POSITION, EXT_PROMPT_TYPE } from './prompt
 import { createTemplateRuntime, preprocessWorldEntries, classifySpecialEntries } from './template.js';
 import { messageText, isNarrator } from './chat.js';
 import { estimateMessageTokens, estimateTokens } from './tokens.js';
-import { collectInitVars, dumpYaml, detectMvu, processMessage, processMessageWithEvents, latestMvuVars, extractUpdateBlocks, withStatusPlaceholder, STATUS_PLACEHOLDER, MVU_EVENTS, isInitVarEntry } from './mvu.js';
+import { collectInitVars, greetingInitVars, dumpYaml, detectMvu, processMessage, processMessageWithEvents, latestMvuVars, extractUpdateBlocks, withStatusPlaceholder, STATUS_PLACEHOLDER, MVU_EVENTS, isInitVarEntry } from './mvu.js';
 import { isMvuUpdateRule, isMvuPlotOnly, stripUpdateBlocks, MVU_DEFAULTS, readOverride, applyOverride, filterUpdateBooks, filterPlotBooks, unsupportedWorlds } from './mvu-extra.js';
 import { mirrorToChatVars } from './mvu-cleanup.js';
 import { cardDepthPrompt, cardRegexScripts, cardTavernHelperScripts, cardLinkedWorld, cardGreetings } from './card.js';
@@ -245,18 +245,33 @@ export class ChatSession {
         return cardGreetings(this.card).some(g => String(g).includes(STATUS_PLACEHOLDER));
     }
 
-    /** 没有任何楼层带 stat_data 时，用 [initvar] 初始化开场白楼层（每个 swipe 各一份） */
+    /**
+     * 没有任何楼层带 stat_data 时，用 [initvar] 初始化开场白楼层（每个 swipe 各一份）。
+     * 某个开场白自己带 <initvar> 块时，这个开场以块里的内容为准，角色主世界书的 [initvar] 不用，
+     * 其余世界书的 [initvar] 照常补上（顶层同名的以开场白的为准）——和 MVU 一样。
+     */
     ensureMvuInit() {
         if (!this.mvuEnabled() || !this.chat.length) return false;
         if (latestMvuVars(this.chat)) return false;
-        const init = collectInitVars(this.allWorldEntries());
+        const entries = this.allWorldEntries();
+        const init = collectInitVars(entries);
         const first = this.chat[0];
         const hasSwipes = Array.isArray(first.swipes) && first.swipes.length > 0;
         const swipes = hasSwipes ? first.swipes : [first.mes];
         first.variables = Array.isArray(first.variables) ? first.variables : [];
-        const placeholder = !first.is_user && Object.keys(init).length > 0 && this.usesStatusPlaceholder();
+        const own = swipes.map(text => greetingInitVars(text, t => this.substitute(t)));
+        let others = null;
+        const statFor = (i) => {
+            if (!own[i]) return clone(init);
+            if (!others) {
+                const primary = this.primaryWorld()?.world;
+                others = collectInitVars(entries.filter(e => e.world !== primary));
+            }
+            return { ...clone(others), ...own[i] };
+        };
+        const placeholder = !first.is_user && (Object.keys(init).length > 0 || own.some(o => o && Object.keys(o).length > 0)) && this.usesStatusPlaceholder();
         swipes.forEach((text, i) => {
-            const base = { ...(first.variables[i] ?? {}), stat_data: clone(init) };
+            const base = { ...(first.variables[i] ?? {}), stat_data: statFor(i) };
             first.variables[i] = extractUpdateBlocks(text).length ? processMessage(base, text).variables : base;
             if (placeholder && typeof text === 'string' && !text.includes(STATUS_PLACEHOLDER)) {
                 const next = withStatusPlaceholder(text);

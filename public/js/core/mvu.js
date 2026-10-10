@@ -64,6 +64,26 @@ export function collectInitVars(entries) {
     return out;
 }
 
+/**
+ * 开场白里的 <initvar> 块。MVU 的规则：某个开场带了这个块，这个开场就以块里的内容当初始变量，
+ * 不再用角色世界书里的 [initvar]（多开场的卡靠它让每个开场有自己的初始状态）。
+ * 没有这个块、或者块都解析不了，返回 null。
+ * @param {(t: string) => string} [substitute] 宏替换
+ */
+export function greetingInitVars(text, substitute = (t) => t) {
+    let out = null;
+    for (const m of String(text ?? '').matchAll(/<(initvar)>(?:\s*```.*)?([\s\S]*?)(?:```\s*)?<\/\1>/gim)) {
+        try {
+            const data = parseYamlOrJson(substitute(m[2]));
+            out ??= {};
+            if (isPlainObject(data)) deepMerge(out, data);
+        } catch (err) {
+            console.warn('[MVU] 开场白里的 <initvar> 解析失败', err);
+        }
+    }
+    return out;
+}
+
 /** 提取 <UpdateVariable> 块（最后一个允许没闭合，处理截断） */
 export function extractUpdateBlocks(text) {
     const s = String(text ?? '');

@@ -4,7 +4,7 @@ import { MacroEngine, objectScope } from '../public/js/core/macros.js';
 import { runRegexScript, getRegexedString, REGEX_PLACEMENT } from '../public/js/core/regex.js';
 import { checkWorldInfo, getSortedEntries, newWorldInfoEntry, parseDecorators, WI_POSITION, WI_LOGIC } from '../public/js/core/worldinfo.js';
 import { render } from '../public/js/core/ejs.js';
-import { applyCommands, parseCommands, extractUpdateBlocks, processMessage, collectInitVars, processMessageWithEvents, toCommandInfo, fromCommandInfo, extractCommands, withStatusPlaceholder, detectMvu, MVU_EVENTS } from '../public/js/core/mvu.js';
+import { applyCommands, parseCommands, extractUpdateBlocks, processMessage, collectInitVars, greetingInitVars, processMessageWithEvents, toCommandInfo, fromCommandInfo, extractCommands, withStatusPlaceholder, detectMvu, MVU_EVENTS } from '../public/js/core/mvu.js';
 import { buildChatCompletion, parseMesExamples, parseExampleIntoIndividual } from '../public/js/core/prompt.js';
 import { normalizePreset, newCustomPrompt } from '../public/js/core/preset.js';
 import { postProcessMessages, buildRequest, splitThinking, parseStreamEvent, parseFullResponse } from '../public/js/core/providers.js';
@@ -422,6 +422,35 @@ _.remove('gone');
     assert.equal(withStatusPlaceholder('你好'), '你好\n\n<StatusPlaceHolderImpl/>');
     assert.equal(withStatusPlaceholder('你好\n<StatusPlaceHolderImpl/>'), '你好\n<StatusPlaceHolderImpl/>');
     assert.equal(withStatusPlaceholder('a<status_current_variable>{"x":1}</status_current_variable>b <StatusPlaceHolderImpl/>'), 'ab <StatusPlaceHolderImpl/>');
+});
+
+test('会话：开场白自带 <initvar> 时，这个开场用它当初始变量，不用角色世界书的 [initvar]', () => {
+    assert.equal(greetingInitVars('没有块的开场'), null);
+    assert.deepEqual(greetingInitVars('开场\n<initvar>\n```yaml\na:\n  b: 1\n```\n</initvar>\n<InitVar>{"c": "{{user}}"}</InitVar>', t => t.replace('{{user}}', '我')), { a: { b: 1 }, c: '我' });
+
+    const charBook = normalizeWorld({ entries: { 0: { uid: 0, comment: '[initvar]', content: '事件:\n  版本: 默认\n  只在世界书里: 1', disable: true } } });
+    const globalBook = normalizeWorld({ entries: { 0: { uid: 0, comment: '[initvar] 全局', content: '全局: 有\n事件:\n  全局的事件: 1' } } });
+    const greetings = [
+        '请选开场 <initvar>{"事件": {"版本": "未选择"}}</initvar>',
+        '正常线 <initvar>{"事件": {"版本": "正常"}}</initvar>',
+        "隐藏线 <initvar>{\"事件\": {\"版本\": \"隐藏\", \"暴露值\": 0}}</initvar><UpdateVariable>_.add('事件.暴露值', 2);</UpdateVariable>",
+        '没带块的开场',
+        '坏掉的块 <initvar>{"事件": </initvar>',
+    ];
+    const card = normalizeCard({ spec: 'chara_card_v2', data: { name: '角色', first_mes: greetings[0], extensions: { world: 'w' } } });
+    const chat = [{ name: '角色', is_user: false, mes: greetings[0], swipes: greetings.slice(), swipe_id: 0 }];
+    const s = new ChatSession({ card, cardFile: '角色', persona: { name: '我' }, preset: normalizePreset({}), chat, meta: {}, settings: { worldInfo: { globalSelect: ['g'] } }, worlds: { w: charBook, g: globalBook } });
+    assert.equal(s.ensureMvuInit(), true);
+    const stat = chat[0].variables.map(v => v.stat_data);
+    // 带块的开场：以块为准（角色世界书里的“只在世界书里”不进来），别的世界书照常补上，顶层同名的听开场白的
+    assert.deepEqual(stat[0], { 全局: '有', 事件: { 版本: '未选择' } });
+    assert.deepEqual(stat[1], { 全局: '有', 事件: { 版本: '正常' } });
+    assert.deepEqual(stat[2], { 全局: '有', 事件: { 版本: '隐藏', 暴露值: 2 } }, '块之后这个开场自己的变量更新照常应用');
+    // 没带块、或块解析不了的开场：还是世界书的 [initvar]
+    const fromBooks = { 全局: '有', 事件: { 全局的事件: 1, 版本: '默认', 只在世界书里: 1 } };
+    assert.deepEqual(stat[3], fromBooks);
+    assert.deepEqual(stat[4], fromBooks);
+    assert.notEqual(stat[0], stat[1], '每个开场各一份，不共用对象');
 });
 
 test('会话：MVU 状态栏占位符只在卡用到它时才补，事件路径写回楼层', async () => {
