@@ -687,6 +687,8 @@ def main():
             assert_in('2 个脚本（1 个启用）', page.locator('#toasts .toast', has_text='已导入预设「脚本预设」').inner_text(), '导入预设的提示')
             page.wait_for_selector('#e2e-preset-script', state='attached', timeout=10000)
             assert js('window.__e2ePresetOff') is None
+            idx = js('window.__e2eScriptIndex')
+            assert idx == ['e2e-mvu', 'e2e-schema', 'e2e-float', 'e2e-self', 'e2e-off', 'e2e-bad', 'e2e-preset-1', 'e2e-preset-off'], f'脚本看到的脚本列表不对：{idx}'
             assert page.locator('#e2e-float').count() == 1, '换预设不该动角色卡的脚本'
             # 预设脚本在发送前改请求、注入提示词
             send('你好，预设脚本')

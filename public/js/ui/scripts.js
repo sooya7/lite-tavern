@@ -26,6 +26,7 @@ let seq = 0;
 let page = null;
 let frames = null;
 let holder = null;
+let helperIndex = null;
 let queue = Promise.resolve();
 
 const host = {
@@ -338,8 +339,22 @@ export function syncScripts() {
     return queue;
 }
 
+/**
+ * 酒馆助手设置面板里的脚本列表（#tavern_helper 下每个脚本一个 div[data-script-id]，顺序：角色卡脚本、预设脚本）。
+ * 很多用官方模板写的脚本靠它判断“同名脚本装了好几份时该哪一份生效”：页面上找不到这个列表，它们就认为
+ * 轮不到自己，加载了但什么也不做。这里放一份看不见的。
+ */
+function renderHelperIndex() {
+    if (!helperIndex) return;
+    const ids = [];
+    if (state.char && state.chat) ids.push(...flattenScriptTrees(scriptTreesOf(state.char.card.data.extensions)).map(x => x.script.id));
+    if (state.preset) ids.push(...flattenScriptTrees(scriptTreesOf(state.preset.data.extensions)).map(x => x.script.id));
+    helperIndex.replaceChildren(...ids.map(id => h('div', { dataset: { scriptId: id } })));
+}
+
 async function doSync() {
     if (!frames) return;
+    renderHelperIndex();
     const want = wanted();
     const keys = new Set(want.map(w => w.key));
     for (const rt of [...running.values()]) if (!keys.has(rt.key)) stop(rt);
@@ -449,7 +464,8 @@ export function initScripts({ bindGenerate } = {}) {
     page = installHostGlobals();
     window.__ltScriptBoot = boot;
     frames = h('div', { id: 'lt-script-frames', 'aria-hidden': 'true' });
-    holder = h('div', { id: 'lt-script-holder', hidden: true }, HOLDER_IDS.map(id => h('div', { id, class: 'st-ext-area' })));
+    helperIndex = h('div', { id: 'tavern_helper' });
+    holder = h('div', { id: 'lt-script-holder', hidden: true }, HOLDER_IDS.map(id => h('div', { id, class: 'st-ext-area' })), helperIndex);
     document.body.append(frames, holder);
     bindGenerate?.({ beforePrompt: applyInjections, afterGeneration: expireInjections });
 
