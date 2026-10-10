@@ -28,13 +28,16 @@ command -v rclone >/dev/null 2>&1 || die "没有 rclone"
 # --drive-upload-cutoff 1G：归档用一次请求传完，不分块。这个 rclone 远端用的是 rclone 自带的公共 client_id，
 # Google 按分钟限流（403 Quota exceeded）；分块上传时限流正好卡在最后一块的提交上，重试 10 次不过就整份重传，
 # 一百多 MB 怎么也传不完。一次请求的话限流只发生在开头，等几秒重试，放行后就能一口气传完。
-RCLONE=(rclone --config "$RCLONE_CONFIG" --contimeout 20s --timeout 2m --drive-upload-cutoff 1G)
+# --bwlimit：上传限速。这台机器出口带宽很小，不限速的话上传会把带宽占满，同一时间轻酒馆请求模型接口会卡住
+# （2026-10-10 晚实测：备份上传期间一次变量更新请求卡了三分多钟，停掉上传一秒后就完成了）。
+BWLIMIT="${LT_BACKUP_BWLIMIT:-160k}"
+RCLONE=(rclone --config "$RCLONE_CONFIG" --contimeout 20s --timeout 2m --drive-upload-cutoff 1G --bwlimit "$BWLIMIT")
 
 retry() {
   local n=1
   until "$@"; do
     (( n >= TRIES )) && return 1
-    log "第 $n 次没成功，${TRY_SLEEP} 秒后重试（rclone ${10:-}）"
+    log "第 $n 次没成功，${TRY_SLEEP} 秒后重试（rclone ${12:-}）"
     sleep "$TRY_SLEEP"
     n=$((n + 1))
   done
@@ -82,7 +85,7 @@ TAR_ARGS+=(-czf "$TMP" "${TAR_SRC[@]}")
 
 log "打包"
 rc=0
-tar "${TAR_ARGS[@]}" || rc=$?
+nice -n 19 ionice -c 3 tar "${TAR_ARGS[@]}" || rc=$?
 # 1 = 打包途中有文件被改写（服务在跑，正常）；更大的才是真出错
 (( rc <= 1 )) || die "tar 退出码 $rc"
 
