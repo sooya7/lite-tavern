@@ -166,6 +166,7 @@ router.get('/api/characters/:file/export', async (req, res, { file }) => {
 });
 
 // ---------- 聊天 ----------
+router.get('/api/recent-chats', async (req) => store.recentChats(Number(new URL(req.url, 'http://x').searchParams.get('limit') ?? 30)));
 router.get('/api/chats/:char', async (req, res, { char }) => store.listChats(char));
 router.get('/api/chats/:char/:name', async (req, res, { char, name }) => {
     // 先取版本号再读内容：中间要是被别处改了，前端拿到的版本号偏旧，下次保存会被拦下来（宁可多问一次）

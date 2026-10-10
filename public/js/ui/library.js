@@ -1,12 +1,18 @@
-// 首页：问候、继续上次的聊天、角色库（搜索 / 排序 / 卡片网格）；一张卡都没有时显示上手步骤
-import { h, clear, icon, iconBtn, formatTime, BRAND_SVG } from './dom.js';
+// 首页：最近聊天（和酒馆首页一样，所有角色的聊天按时间排，点一下就进去）和角色库两个标签；一张卡都没有时显示上手步骤
+import { h, clear, icon, iconBtn, formatTime, toast, BRAND_SVG } from './dom.js';
 import { state, activePersona } from '../state.js';
-import { selectCharacter, refresh } from '../controller.js';
+import { selectCharacter, openChat, refresh } from '../controller.js';
+import { api } from '../api.js';
 import { charAvatar } from './avatars.js';
 import { charMenu, onImport, onCreate, plainSnippet, chatTitle } from './sidebar.js';
 
 let query = '';
 let sort = 'recent';
+/** 首页显示哪个标签：recent 最近聊天 | library 角色库 */
+let homeTab = 'recent';
+export function setHomeTab(tab) { homeTab = tab === 'library' ? 'library' : 'recent'; }
+/** 最近聊天的上一次结果：先画旧的，后台拉新的再换 */
+let recentCache = null;
 
 const openPanel = (id) => window.dispatchEvent(new CustomEvent('lt:open-panel', { detail: id }));
 
@@ -27,36 +33,72 @@ const SORTS = {
 
 export function renderHome(el) {
     const wrap = h('div', { class: 'home-wrap' });
-    const persona = activePersona();
     const hasChars = state.characters.length > 0;
-    wrap.append(h('div', { class: 'greeting' },
-        h('span', { class: 'greeting-mark', html: BRAND_SVG }),
-        h('h1', {}, `${greetingWord()}，${persona.name || 'User'}`),
-        h('p', {}, hasChars ? '想和谁继续今天的故事？' : '兼容酒馆的角色卡、预设、世界书、正则、EJS 模板与 MVU 变量的轻量前端')));
     if (!hasChars) {
+        const persona = activePersona();
+        wrap.append(h('div', { class: 'greeting' },
+            h('span', { class: 'greeting-mark', html: BRAND_SVG }),
+            h('h1', {}, `${greetingWord()}，${persona.name || 'User'}`),
+            h('p', {}, '兼容酒馆的角色卡、预设、世界书、正则、EJS 模板与 MVU 变量的轻量前端')));
         wrap.append(onboarding());
         el.append(wrap);
         return;
     }
-    if (state.char && state.chat) wrap.append(continueCard());
-    wrap.append(library());
+    const tab = (id, label) => h('button', {
+        class: `home-tab ${homeTab === id ? 'active' : ''}`,
+        onclick: () => { if (homeTab !== id) { homeTab = id; refresh(['chat']); } },
+    }, label);
+    wrap.append(h('div', { class: 'home-tabs' }, tab('recent', '最近聊天'), tab('library', '角色库')));
+    wrap.append(homeTab === 'library' ? library() : recentChats());
     el.append(wrap);
 }
 
-function continueCard() {
-    const card = state.char.card.data;
-    const msgs = state.chat.messages;
-    const last = msgs.length ? plainSnippet(msgs[msgs.length - 1].mes, 90) : '';
+function recentChats() {
+    const box = h('div', { class: 'recent-list' });
+    const draw = (list) => {
+        clear(box);
+        if (!list) { box.append(h('div', { class: 'empty' }, '正在读取…')); return; }
+        if (!list.length) { box.append(h('div', { class: 'empty' }, '还没有聊天。去「角色库」选一个角色开始吧')); return; }
+        for (const c of list) box.append(recentItem(c));
+    };
+    draw(recentCache);
+    api.recentChats(50).then((list) => {
+        recentCache = list;
+        draw(list);
+    }, (e) => { if (!recentCache) { clear(box); box.append(h('div', { class: 'empty' }, `读取最近聊天失败：${e.message}`)); } });
+    return box;
+}
+
+function recentItem(c) {
+    const current = state.char?.file === c.file && state.chat?.name === c.chat;
+    const meta = [chatTitle(c.chat, c.charName), c.count > 0 ? `${c.count} 条` : ''].filter(Boolean).join(' · ');
     return h('button', {
-        class: 'continue-card',
-        onclick: () => { state.view = 'chat'; refresh(['chat', 'topbar', 'sidebar']); },
+        class: `recent-item ${current ? 'active' : ''}`,
+        title: `${c.charName} · ${c.chat}`,
+        onclick: () => openRecent(c),
     },
-    charAvatar(state.char.file, 'avatar', { name: card.name }),
-    h('div', { class: 'grow' },
-        h('div', { class: 'cc-k' }, '继续上次的聊天'),
-        h('div', { class: 'cc-t' }, `${card.name} · ${chatTitle(state.chat.name, card.name)}`),
-        last ? h('div', { class: 'cc-d' }, last) : null),
-    icon('right'));
+    charAvatar(c.file, 'avatar', { name: c.charName }),
+    h('div', { class: 'ri-body' },
+        h('div', { class: 'ri-top' },
+            h('span', { class: 'ri-name' }, c.charName),
+            h('span', { class: 'ri-time' }, formatTime(c.mtime))),
+        h('div', { class: 'ri-meta' }, meta),
+        c.last ? h('div', { class: 'ri-last' }, plainSnippet(c.last, 120)) : null));
+}
+
+async function openRecent(c) {
+    try {
+        if (state.char?.file === c.file && state.chat?.name === c.chat) {
+            state.view = 'chat';
+            refresh(['chat', 'topbar', 'sidebar']);
+            return;
+        }
+        if (state.char?.file !== c.file) await selectCharacter(c.file, { openLatest: false });
+        if (state.char?.file !== c.file) return; // 正在生成之类的原因没切过去
+        await openChat(c.chat);
+    } catch (e) {
+        toast(`打开聊天失败：${e.message}`, 'error');
+    }
 }
 
 function library() {

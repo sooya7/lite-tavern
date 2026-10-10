@@ -501,7 +501,7 @@ def main():
             close_menu()
             # 左栏只剩导航；顶栏没有图标猜谜
             nav = [t.strip() for t in page.locator('#left .side-nav .nav-item').all_inner_texts()]
-            assert [n.split('\n')[0] for n in nav] == ['新聊天', '角色库'], nav
+            assert [n.split('\n')[0] for n in nav] == ['新聊天', '首页'], nav
             assert page.locator('#left .side-head button').count() == 1, '左栏头部应该只剩“收起”'
             assert page.locator('#topbar .tb-btn.toggle-right').inner_text().strip() == '设置'
         run('每个功能只留一个入口（+ / 标题 / 消息菜单 / 左栏）', one_home_per_feature)
@@ -556,8 +556,9 @@ def main():
             page.locator('#composer-model').click()
             page.locator('.menu button', has_text='mock-gpt').first.click()
             page.wait_for_timeout(300)
-            page.locator('#left button', has_text='角色库').first.click()
+            page.locator('#left button', has_text='首页').first.click()
             page.wait_for_selector('#chat .home-wrap')
+            page.locator('#chat .home-tab', has_text='角色库').click()
             with page.expect_file_chooser() as fc:
                 page.locator('#chat .lib-head button', has_text='导入').click()
             fc.value.set_files(SCRIPT_CARD)

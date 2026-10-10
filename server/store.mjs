@@ -330,6 +330,31 @@ export class Store {
         return out.sort((a, b) => b.mtime - a.mtime);
     }
 
+    /** 所有角色的聊天按最后修改时间排，取最近 limit 个（酒馆首页那种“最近聊天”）。只给入选的读摘要 */
+    async recentChats(limit = 30) {
+        const chars = await this.listCharacters();
+        const all = [];
+        for (const c of chars) {
+            if (c.error) continue;
+            const dir = this.chatDir(c.id);
+            let files = [];
+            try { files = (await fsp.readdir(dir)).filter(f => f.endsWith('.jsonl')); } catch { continue; }
+            for (const f of files) {
+                try {
+                    const st = await fsp.stat(path.join(dir, f));
+                    all.push({ file: c.file, charName: c.name, chat: f.replace(/\.jsonl$/, ''), mtime: st.mtimeMs, size: st.size, full: path.join(dir, f) });
+                } catch { /* 刚被删掉 */ }
+            }
+        }
+        all.sort((a, b) => b.mtime - a.mtime);
+        const out = [];
+        for (const x of all.slice(0, Math.max(1, Math.min(100, limit)))) {
+            const { count, last } = await chatSummary(x.full, x.size).catch(() => ({ count: 0, last: '' }));
+            out.push({ file: x.file, charName: x.charName, chat: x.chat, mtime: x.mtime, size: x.size, count, last });
+        }
+        return out;
+    }
+
     chatFile(charId, name) {
         return path.join(this.chatDir(charId), `${sanitizeName(name)}.jsonl`);
     }

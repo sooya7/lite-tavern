@@ -8,6 +8,7 @@ import { importFiles } from './importers.js';
 import { newCard } from '../core/card.js';
 import { cardGreetings } from '../core/card.js';
 import { charAvatar, personaAvatar } from './avatars.js';
+import { setHomeTab } from './library.js';
 
 const RECENT_CHARS = 6;
 
@@ -18,7 +19,9 @@ export function closeOnMobile() {
 const openPanel = (id) => window.dispatchEvent(new CustomEvent('lt:open-panel', { detail: id }));
 
 /** 回到首页（问候 + 角色库） */
-export function goHome() {
+/** @param {'recent'|'library'} [tab] 首页的哪个标签，默认“最近聊天” */
+export function goHome(tab = 'recent') {
+    setHomeTab(tab);
     state.view = 'home';
     refresh(['chat', 'topbar', 'sidebar']);
     closeOnMobile();
@@ -48,7 +51,7 @@ export function plainSnippet(text, max = 80) {
 }
 
 export async function startNewChat(anchor) {
-    if (!state.char) { goHome(); return; }
+    if (!state.char) { goHome('library'); return; }
     const greetings = cardGreetings(state.char.card);
     if (greetings.filter(Boolean).length > 1 && anchor) {
         popupMenu(anchor, greetings.map((g, i) => ({
@@ -80,8 +83,7 @@ export function renderSidebar() {
                 title: state.char ? `和「${charName}」开始新聊天` : '先选一个角色',
                 onclick: (e) => startNewChat(e.currentTarget),
             }, h('span', { class: 'nc-ic' }, icon('plus')), '新聊天'),
-            h('button', { class: `nav-item ${home ? 'active' : ''}`, onclick: goHome }, icon('users'), '角色库',
-                h('span', { class: 'nav-count' }, state.characters.length || '')),
+            h('button', { class: `nav-item ${home ? 'active' : ''}`, onclick: () => goHome('recent') }, icon('home'), '首页'),
         ),
         list,
         sideFoot(),
@@ -115,7 +117,7 @@ function renderRecentChars(list) {
     if (cur && !items.includes(cur)) items = [cur, ...items.slice(0, RECENT_CHARS - 1)];
     list.append(h('div', { class: 'section-title' },
         h('span', { class: 'grow' }, '最近角色'),
-        all.length > items.length ? h('button', { class: 'section-link', onclick: goHome }, `全部 ${all.length}`) : null));
+        h('button', { class: 'section-link', onclick: () => goHome('library') }, `全部 ${all.length}`)));
     if (!items.length) {
         list.append(h('div', { class: 'empty small', style: { padding: '12px' } }, '还没有角色，去角色库导入或新建一个'));
         return;
@@ -297,7 +299,7 @@ export async function deleteChat(c) {
 
 /** 旧接口：以前左栏有“角色 / 聊天记录”两个标签，现在合在一起了 */
 export function setSidebarTab(t) {
-    if (t === 'chars') goHome();
+    if (t === 'chars') goHome('library');
     else renderSidebar();
 }
 

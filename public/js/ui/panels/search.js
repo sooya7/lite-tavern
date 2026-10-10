@@ -101,7 +101,7 @@ export const FEATURES = [
 
     // ---- 面板外的动作
     { t: '新聊天', action: 'newChat', k: '开新聊天 new chat 重开' },
-    { t: '角色库', action: 'home', k: '全部角色 首页 选角色 换角色' },
+    { t: '首页（最近聊天 / 角色库）', action: 'home', k: '全部角色 角色库 首页 最近聊天 历史记录 选角色 换角色' },
     { t: '新建角色', action: 'newChar', k: '创建角色 写卡' },
 ];
 

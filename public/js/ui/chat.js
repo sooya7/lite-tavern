@@ -465,7 +465,7 @@ export function renderTopbar() {
             sub ? h('span', { class: 's' }, `/ ${sub}`) : null,
             icon('chevronDown')));
     } else {
-        bar.append(h('div', { class: 'title-plain' }, state.characters.length ? '角色库' : '轻酒馆'));
+        bar.append(h('div', { class: 'title-plain' }, state.characters.length ? '首页' : '轻酒馆'));
     }
     bar.append(
         h('div', { class: 'spacer' }),

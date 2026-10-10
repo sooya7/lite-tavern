@@ -80,6 +80,7 @@ export const api = {
     thumbUrl: (file, v = '') => `/api/characters/${enc(file)}/avatar?thumb=1${v ? `&v=${v}` : ''}`,
     exportCharacterUrl: (file, format) => `/api/characters/${enc(file)}/export?format=${format}`,
 
+    recentChats: (limit = 30) => request('GET', `/api/recent-chats?limit=${limit}`),
     listChats: (charId) => request('GET', `/api/chats/${enc(charId)}`),
     /** @returns {Promise<{text: string, version: string}>} version 是这份内容的版本号，保存时带回去 */
     getChat: async (charId, name) => {
